@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+            http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.29.xsd">
+
+    <!-- mod_action: the BFF's OWN durable audit trail of moderator actions. Every
+         server-wide block (and refer/recommend) a mod triggers is recorded here
+         regardless of the external homeserver call outcome — so a STUBBED block is
+         still fully auditable, and the external result is captured in `result`
+         (stubbed | ok | degraded:<reason>). IDs are generated app-side (UUID) so no
+         DB-default UUID function is needed (portable Postgres + the H2 test DB).
+         `target` is a reserved word in some dialects; Liquibase quotes it per
+         dialect and the H2 test store runs with NON_KEYWORDS, so the DDL works on
+         both. -->
+    <changeSet id="001-mod-action" author="hugmesh">
+        <createTable tableName="mod_action">
+            <column name="id" type="uuid">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <!-- The acting moderator's Casdoor subject (from the forwarded JWT). -->
+            <column name="actor" type="varchar(255)">
+                <constraints nullable="false"/>
+            </column>
+            <!-- e.g. matrix.block-user, mastodon.block-instance, federation.refer. -->
+            <column name="action" type="varchar(64)">
+                <constraints nullable="false"/>
+            </column>
+            <!-- matrix | mastodon | federation. -->
+            <column name="platform" type="varchar(32)">
+                <constraints nullable="false"/>
+            </column>
+            <!-- The MXID / instance domain / acct / moderation-request acted on. -->
+            <column name="target" type="varchar(512)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="reason" type="varchar(2048)"/>
+            <!-- stubbed | ok | degraded:<reason> — honest external-call outcome. -->
+            <column name="result" type="varchar(255)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="ts" type="timestamp" defaultValueComputed="now()">
+                <constraints nullable="false"/>
+            </column>
+        </createTable>
+
+        <createIndex tableName="mod_action" indexName="idx_mod_action_actor_ts">
+            <column name="actor"/>
+            <column name="ts"/>
+        </createIndex>
+    </changeSet>
+</databaseChangeLog>

@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+            http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.29.xsd">
+
+    <!--
+      CROSS-TENANT dedup-collision fix. The 003 dedup uniqueness (uq_mod_action_dedup_key)
+      was GLOBAL on dedup_key alone, so in multi-brand mode two brands' Casdoor minting the
+      SAME subject string (e.g. both "alice") banning the same target+role with NO client
+      idempotency token produced the SAME dedup key — brand-Y's recordBan hit ON CONFLICT
+      DO NOTHING against brand-X's row, then the read-back returned brand-X's row, LEAKING
+      brand-X audit data into brand-Y's response AND silently swallowing brand-Y's effect.
+
+      The fix is defence-in-depth, three legs:
+        (key)   ModActionKey.ban now hashes the DOMAIN into the dedup key, so the two
+                brands can no longer even produce the same key.
+        (read)  ModActionRepository.byDedupKey is domain-scoped (AND domain = :domain,
+                fail-closed on null).
+        (DB)    THIS changeset makes the uniqueness a COMPOSITE on (dedup_key, domain) so
+                the database itself can never coalesce two brands' rows — a brand-Y ban with
+                a key that somehow coincided still gets its OWN row (different domain).
+
+      Portable DDL (PostgreSQL + the H2 PostgreSQL-compat test store): DROP the global
+      unique index and CREATE the composite unique index. Standard SQL treats NULLs as
+      DISTINCT in a unique index on BOTH stores, so the legacy block/refer/recommend rows
+      (dedup_key NULL) keep coexisting freely; only the ban surface's non-null dedup_key is
+      forced unique, now PER (dedup_key, domain). The INSERT ... ON CONFLICT DO NOTHING in
+      ModActionRepository.recordBan (no explicit conflict target) fires against this index.
+
+        006a — drop global uq_mod_action_dedup_key
+        006b — add composite uq_mod_action_dedup_key_domain (dedup_key, domain)
+    -->
+
+    <changeSet id="006-mod-action-drop-global-dedup-unique" author="hugmesh">
+        <comment>Drop the GLOBAL dedup_key uniqueness (003) — it collided cross-tenant.</comment>
+        <dropIndex tableName="mod_action" indexName="uq_mod_action_dedup_key"/>
+        <rollback>
+            <createIndex tableName="mod_action" indexName="uq_mod_action_dedup_key" unique="true">
+                <column name="dedup_key"/>
+            </createIndex>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="006-mod-action-dedup-domain-unique" author="hugmesh">
+        <comment>Composite idempotency: at most one row per (non-null dedup_key, domain) — per-brand.</comment>
+        <!-- A PLAIN composite unique index (NOT a partial WHERE index — H2 does not
+             support partial indexes), exactly as 003 did for the single column. Standard
+             SQL treats NULLs as DISTINCT in a unique index, so the existing
+             block/refer/recommend rows (dedup_key NULL) all coexist freely on both
+             PostgreSQL and the H2 PostgreSQL-compat test store. The non-null ban-surface
+             dedup_key is forced unique PER domain, so two brands sharing a subject string
+             each get their OWN row. ModActionRepository.recordBan's INSERT ... ON CONFLICT
+             DO NOTHING (no explicit conflict target) targets this index. -->
+        <createIndex tableName="mod_action" indexName="uq_mod_action_dedup_key_domain" unique="true">
+            <column name="dedup_key"/>
+            <column name="domain"/>
+        </createIndex>
+        <rollback>
+            <dropIndex tableName="mod_action" indexName="uq_mod_action_dedup_key_domain"/>
+        </rollback>
+    </changeSet>
+</databaseChangeLog>

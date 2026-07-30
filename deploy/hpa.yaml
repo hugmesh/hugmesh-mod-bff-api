@@ -1,0 +1,32 @@
+# HorizontalPodAutoscaler for hugmesh-mod-bff-api. Modelled byte-for-byte on
+# manifests/remote-fragment/hpa.yaml (the first HPA in the cluster): plain
+# autoscaling/v2, Resource metrics only. The mod-bff is a stateless Spring Boot resource server, so it scales out cleanly under load.
+#
+# REQUIRES metrics-server (apps/01-metrics-server.yaml, already live). Until the
+# metrics API answers, this HPA stays inert and the Deployment's replicas floor
+# governs. CPU 70% + memory 80% — both Resource targets read the
+# resources.requests the Deployment already declares (cpu:100m, memory:256Mi). The replicaCount
+# floor is held at the Deployment's current value (NOT raised here); min/max only
+# widen the band the HPA may move within (min 2 keeps an HA pair).
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: hugmesh-mod-bff-api
+  namespace: hugmesh-backend
+  labels: { app: hugmesh-mod-bff-api, app.kubernetes.io/part-of: hugmesh.systems }
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: hugmesh-mod-bff-api
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: { type: Utilization, averageUtilization: 70 }
+    - type: Resource
+      resource:
+        name: memory
+        target: { type: Utilization, averageUtilization: 80 }

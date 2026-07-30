@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+            http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.29.xsd">
+
+    <!--
+      DB-generated UUID primary key — the org-wide migration EXEMPLAR.
+
+      Decision (pinned): stop minting UUID primary keys in Java
+      (UUID.randomUUID()); let Postgres generate them via a column DEFAULT of
+      gen_random_uuid() (UUIDv4, from the pgcrypto extension — the most-secure
+      PG-native UUID generator) and read the generated id back on insert. The
+      column type stays uuid and the entity @Id stays java.util.UUID; only the
+      SOURCE of the id moves from the app to the database.
+
+      mod_action.id is ALREADY a native uuid PK (changelog 001) — so there is NO
+      type migration here. This changeset only:
+
+        1. CREATE EXTENSION IF NOT EXISTS pgcrypto — provides gen_random_uuid().
+           Idempotent + harmless if already present (other HugMesh schemas
+           install it too). This is the reason the affected slice tests move to
+           Testcontainers-Postgres: H2 has neither pgcrypto nor a reliable
+           INSERT ... RETURNING, so the prod changelog can no longer be applied
+           over the H2 PostgreSQL-compat store.
+
+        2. ADD a DEFAULT of gen_random_uuid() to mod_action.id. After this, an
+           INSERT that OMITS id gets a DB-generated UUIDv4; the repository's
+           INSERT ... RETURNING id reads the generated value back.
+
+      Numbered 009, one above the current max (008-mod-action-notify). Appended
+      LAST in the master changelog.
+    -->
+
+    <changeSet id="009-pgcrypto-extension" author="hugmesh">
+        <comment>Install pgcrypto so gen_random_uuid() is available as the
+                 mod_action.id column DEFAULT. IF NOT EXISTS — idempotent.</comment>
+        <sql>CREATE EXTENSION IF NOT EXISTS pgcrypto;</sql>
+    </changeSet>
+
+    <changeSet id="009-mod-action-id-db-default" author="hugmesh">
+        <comment>Let the database generate mod_action.id via gen_random_uuid()
+                 (UUIDv4) instead of the app minting UUID.randomUUID(). The
+                 column stays uuid PK; only the id SOURCE moves to the DB. The
+                 repository INSERTs now omit id and RETURNING id reads it back.</comment>
+        <addDefaultValue tableName="mod_action"
+                         columnName="id"
+                         columnDataType="uuid"
+                         defaultValueComputed="gen_random_uuid()"/>
+    </changeSet>
+
+</databaseChangeLog>

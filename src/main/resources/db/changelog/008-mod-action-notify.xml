@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+            http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.29.xsd">
+
+    <!--
+      Notifications PR6 — the service-scoped mod-action COMMS directive rides the
+      mod_action row.
+
+      A moderator can ask the platform to NOTIFY the affected user about a ban/lift/lock
+      via the per-domain neutral @system sender. The DIRECTIVE (which channels; or
+      email-only) is recorded on the action row so it is auditable + can be forwarded to
+      admin-bff's notification subsystem. Two NULLABLE columns (null on every legacy row
+      + when the mod requests no notification):
+
+        - notify_channels    a CSV of requested channel names (e.g. 'in-app,matrix'),
+                             SERVICE-SCOPED by the action's platform (a 'matrix' ban can
+                             request the matrix channel; an unrelated channel is dropped
+                             by the service before it is stored). NULL = no directive.
+        - notify_email_only  when true, the directive is forced to email + in-app ONLY
+                             (the conservative low-noise option) regardless of
+                             notify_channels. NULL/false = honour notify_channels.
+
+      CRITICAL IDENTITY RULE: these columns DESCRIBE the requested fan-out; they NEVER
+      carry — and the @system outbox-builder in admin-bff NEVER copies — the acting
+      mod identity (mod_action.actor). The neutral @system sender must never expose who
+      moderated (the same posture as the public AppealContact resolver).
+
+      SHIPS DARK: nothing consumes these columns yet beyond the audit row + the
+      forwarded directive; admin-bff's outbox subsystem (PR2/PR5/PR7) is the consumer.
+
+      Numbered 008, one above the current max (007-mod-action-wiki). Portable addColumn
+      (PostgreSQL + the H2 PostgreSQL-compat test store). Appended LAST in the master.
+    -->
+
+    <changeSet id="008-mod-action-notify-columns" author="hugmesh">
+        <comment>Add the service-scoped @system notification directive columns to
+                 mod_action: notify_channels (CSV) + notify_email_only (bool). Both
+                 nullable — null on legacy rows + when no notification is requested.
+                 NEVER carries the acting mod identity.</comment>
+        <addColumn tableName="mod_action">
+            <!-- CSV of requested channels, service-scoped by platform. NULL = none. -->
+            <column name="notify_channels" type="varchar(256)"/>
+            <!-- Force email + in-app only when true. NULL/false = honour notify_channels. -->
+            <column name="notify_email_only" type="boolean"/>
+        </addColumn>
+    </changeSet>
+
+</databaseChangeLog>

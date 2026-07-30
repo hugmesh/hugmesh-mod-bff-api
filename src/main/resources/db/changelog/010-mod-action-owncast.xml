@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+            http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.29.xsd">
+
+    <!--
+      Owncast live-stream moderation events. The kill/hide/restore EFFECT is owned by
+      the SEPARATE hugmesh-owncast-bff-api (its /bff/owncast/mod surface: ban/restore
+      reuse the owncast_grant desired-state, hide flips owncast_stream.visibility, and
+      each action journals into its local owncast_moderation_audit). This changeset makes
+      those events FIRST-CLASS in this BFF's mod_action central ledger — a moderator
+      driving the action through /bff/mod/owncast/** gets the effector call AND a
+      domain-stamped ledger row alongside the matrix/mastodon/access/domain-lock/wiki
+      actions (the same pattern changeset 007 shipped for the wiki access-overlay).
+
+      No new COLUMNS are needed: an owncast row reuses the existing mod_action shape
+      (actor/action/platform/target/reason/result/ts/domain — the block-style
+      record(...) write, not the ban-shape dedup columns). This changeset only WIDENS
+      the two CHECK constraints (last redefined in 007):
+
+        010a - action CHECK   (widen ck_mod_action_action with owncast.hide/owncast.kill/
+                               owncast.restore; ALSO adds the federation.finding-resolve
+                               verb that ModActionType gained with the system-finding
+                               resolve proxy (PR #54) WITHOUT a matching CHECK widen —
+                               restoring the API<->DB CHECK parity the constraint defends:
+                               without it every resolveFinding audit INSERT violates
+                               ck_mod_action_action at runtime)
+        010b - platform CHECK (widen ck_mod_action_platform with the 'owncast' platform —
+                               a NON-homeserver platform, sibling of 'access'/
+                               'domain-lock'/'wiki')
+
+      Portable DDL (PostgreSQL + the H2 PostgreSQL-compat test store): DROP the existing
+      CHECK and re-ADD the widened one, each in its own changeSet so a redeploy reports
+      them independently. The rollback restores the 007-era CHECK (with the wiki verbs +
+      'wiki', WITHOUT the owncast/finding-resolve additions).
+    -->
+
+    <changeSet id="010-mod-action-action-check-owncast" author="hugmesh">
+        <comment>Widen ck_mod_action_action with the owncast.hide/kill/restore verbs
+            (+ the missing federation.finding-resolve — API-DB CHECK parity fix).</comment>
+        <sql>ALTER TABLE mod_action DROP CONSTRAINT ck_mod_action_action</sql>
+        <sql>
+            ALTER TABLE mod_action
+                ADD CONSTRAINT ck_mod_action_action
+                CHECK (action IN (
+                    'matrix.block-user', 'matrix.block-instance',
+                    'mastodon.block-user', 'mastodon.block-instance',
+                    'federation.refer', 'federation.recommend',
+                    'federation.finding-resolve',
+                    'access.suspend', 'access.restore',
+                    'domain.lock', 'domain.unlock',
+                    'wiki.grant', 'wiki.timeout', 'wiki.ban', 'wiki.restore',
+                    'owncast.hide', 'owncast.kill', 'owncast.restore'))
+        </sql>
+        <rollback>
+            <sql>ALTER TABLE mod_action DROP CONSTRAINT ck_mod_action_action</sql>
+            <sql>
+                ALTER TABLE mod_action
+                    ADD CONSTRAINT ck_mod_action_action
+                    CHECK (action IN (
+                        'matrix.block-user', 'matrix.block-instance',
+                        'mastodon.block-user', 'mastodon.block-instance',
+                        'federation.refer', 'federation.recommend',
+                        'access.suspend', 'access.restore',
+                        'domain.lock', 'domain.unlock',
+                        'wiki.grant', 'wiki.timeout', 'wiki.ban', 'wiki.restore'))
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="010-mod-action-platform-check-owncast" author="hugmesh">
+        <comment>Widen ck_mod_action_platform with the 'owncast' platform.</comment>
+        <sql>ALTER TABLE mod_action DROP CONSTRAINT ck_mod_action_platform</sql>
+        <sql>
+            ALTER TABLE mod_action
+                ADD CONSTRAINT ck_mod_action_platform
+                CHECK (platform IN ('matrix', 'mastodon', 'federation', 'access',
+                                    'domain-lock', 'wiki', 'owncast'))
+        </sql>
+        <rollback>
+            <sql>ALTER TABLE mod_action DROP CONSTRAINT ck_mod_action_platform</sql>
+            <sql>
+                ALTER TABLE mod_action
+                    ADD CONSTRAINT ck_mod_action_platform
+                    CHECK (platform IN ('matrix', 'mastodon', 'federation', 'access', 'domain-lock', 'wiki'))
+            </sql>
+        </rollback>
+    </changeSet>
+</databaseChangeLog>

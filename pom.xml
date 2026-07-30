@@ -1,0 +1,122 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <!-- The org metapom — consolidates the Spring Boot 4.0.7 / Spring Cloud 2025.1.2 / Java 25 LTS reactive BFF
+       baseline (WebFlux + Casdoor OAuth2 resource server + R2DBC/Liquibase +
+       SpringDoc) as shared <dependencies>, the dependencyManagement
+       (hugmesh-commons, AWS SDK BOM, resilience4j, springdoc version pins), and the
+       pluginManagement (compiler / surefire bytebuddy flag / spring-boot / native).
+       hugmesh-parent is itself a child of spring-boot-starter-parent:3.5.5, so the
+       Spring Boot dependency + plugin management is inherited TRANSITIVELY. -->
+  <parent>
+    <groupId>systems.hugmesh</groupId>
+    <artifactId>hugmesh-parent</artifactId>
+    <version>2.8.0</version>
+    <relativePath/>
+  </parent>
+
+  <!-- NO -api suffix in the artifactId; the -api lives only in the repo / service
+       / image name (hugmesh-mod-bff-api), mirroring admin-bff. -->
+  <artifactId>mod-bff</artifactId>
+  <version>0.2.0</version>
+
+  <dependencies>
+    <!-- The shared, canonical HugMesh security/tenancy/config/web building blocks
+         (Casdoor JWT authorities, issuer->domain DomainRegistry, Roles + PrincipalDomain
+         helpers, the config-gated multi-issuer TenancyResourceServerConfig, the BFF
+         ApiException). Version is MANAGED by hugmesh-parent's dependencyManagement,
+         so NO <version> here. This replaces the mod-BFF's deleted local copies of
+         security.DomainRegistry + config.{CasdoorAuthorities,TenancyResourceServerConfig}
+         + web.ApiException. (security.Roles is KEPT per-repo — it carries extra mod-BFF
+         API: domainApplies / isSuperadmin(Authentication) / domainOf(Authentication)
+         not present in the commons Roles.) -->
+    <dependency>
+      <groupId>systems.hugmesh</groupId>
+      <artifactId>hugmesh-commons</artifactId>
+    </dependency>
+
+    <!-- commons test-support base classes (PostgresTestSupport) for full-context
+         Testcontainers-backed integration tests. -->
+    <dependency>
+      <groupId>systems.hugmesh</groupId>
+      <artifactId>hugmesh-commons</artifactId>
+      <version>2.1.0</version>
+      <classifier>tests</classifier>
+      <scope>test</scope>
+    </dependency>
+
+    <!-- Spring Boot 4 split out the reactive WebClient auto-configuration (the
+         WebClient.Builder bean) into spring-boot-webclient — it is NO LONGER a
+         transitive of spring-boot-starter-webflux. This repo's outbound clients
+         (federation-api / admin-bff / matrix / mastodon) inject WebClient.Builder,
+         so the module must be on the classpath. Version is Boot-BOM-managed via the
+         parent, so no <version> here. -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-webclient</artifactId>
+    </dependency>
+
+    <!-- ============================================================================
+         The core reactive BFF stack (webflux / actuator / security /
+         oauth2-resource-server / validation), the data-access stack (data-r2dbc /
+         r2dbc-postgresql / liquibase-core / spring-jdbc / postgresql), springdoc and
+         the whole test stack (spring-boot-starter-test / reactor-test /
+         spring-security-test / r2dbc-h2 / h2) are INHERITED from hugmesh-parent's
+         common <dependencies>. They were removed here to de-duplicate. ONLY the
+         repo-specific dependencies below remain.
+         ============================================================================ -->
+
+    <!-- resilience4j circuit breaker (reactive) — guards the OUTBOUND ban write to
+         admin-bff (the access-suspension desired-state) and the homeserver doBlock
+         seam. A stalled/erroring admin-bff or homeserver trips the breaker; the
+         fallback returns a DEGRADED outcome (never a success), so the ban endpoint
+         degrades to a 202 pending-reconcile and NEVER a 200 "blocked". Repo-specific
+         (NOT in the parent's common <dependencies>); versions are MANAGED by
+         hugmesh-parent's dependencyManagement (2.2.0, Boot 3.5.x-compatible) so no
+         <version> here. -->
+    <dependency>
+      <groupId>io.github.resilience4j</groupId>
+      <artifactId>resilience4j-spring-boot4</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.github.resilience4j</groupId>
+      <artifactId>resilience4j-reactor</artifactId>
+    </dependency>
+  </dependencies>
+
+  <build><plugins>
+    <!-- The spring-boot, native and surefire (bytebuddy-experimental argLine)
+         plugins are configured in hugmesh-parent's pluginManagement; declaring
+         them here (no config) binds the managed config. The native plugin is bound
+         so `./mvnw -Pnative native:compile` works; spring-boot repackages the app. -->
+    <plugin>
+      <groupId>org.graalvm.buildtools</groupId>
+      <artifactId>native-maven-plugin</artifactId>
+    </plugin>
+    <plugin>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-maven-plugin</artifactId>
+    </plugin>
+  </plugins></build>
+
+  <profiles>
+    <!-- Native build: `./mvnw -Pnative native:compile` produces a GraalVM binary.
+         The parent's native plugin management does the heavy lifting; this thin
+         local profile mirrors admin-bff/federation so the same `-Pnative`
+         invocation works. -->
+    <profile>
+      <id>native</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.graalvm.buildtools</groupId>
+            <artifactId>native-maven-plugin</artifactId>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
+</project>

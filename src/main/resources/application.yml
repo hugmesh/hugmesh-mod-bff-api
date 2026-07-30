@@ -1,0 +1,289 @@
+spring:
+  application:
+    name: hugmesh-mod-bff-api
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          # The Casdoor issuer (id.hugmesh.systems) the be-gateway mints JWTs
+          # against; the resource-server validates the forwarded bearer here too.
+          issuer-uri: "${CASDOOR_ISSUER_URI:https://id.hugmesh.systems}"
+          # Explicit JWKS so the resource server does NOT do OIDC discovery against issuer-uri
+          # (unreachable in-container when issuer-uri is the browser-facing localhost:8000, which
+          # 500s every authenticated call). Mirrors hugmesh-actions + the gateway; compose sets
+          # CASDOOR_JWKS_URI=http://casdoor:8000/.well-known/jwks. iss is still validated via issuer-uri.
+          jwk-set-uri: "${CASDOOR_JWKS_URI:${CASDOOR_ISSUER_URI:https://id.hugmesh.systems}/.well-known/jwks}"
+
+  # Runtime data access is REACTIVE (R2DBC) over the config datastore — this BFF
+  # owns exactly ONE runtime table, the mod_action audit log. Everything else lives
+  # in federation-api (moderation queue + manifest) and the homeservers
+  # (tuwunel/akkoma); the BFF is a client of those, never their datastore.
+  r2dbc:
+    url: "${SPRING_R2DBC_URL:r2dbc:postgresql://hugmesh-pg.hugmesh-backend.svc.cluster.local:5432/hugmesh}"
+    username: "${SPRING_R2DBC_USERNAME:hugmesh}"
+    password: "${SPRING_R2DBC_PASSWORD:}"
+
+  # Liquibase owns schema migrations. It has NO R2DBC runner, so it uses a plain
+  # JDBC datasource — the ONLY JDBC use in the app; all runtime access is R2DBC.
+  liquibase:
+    enabled: true
+    change-log: "classpath:db/changelog/db.changelog-master.xml"
+    url: "${SPRING_LIQUIBASE_URL:jdbc:postgresql://hugmesh-pg.hugmesh-backend.svc.cluster.local:5432/hugmesh}"
+    user: "${SPRING_LIQUIBASE_USER:hugmesh}"
+    password: "${SPRING_LIQUIBASE_PASSWORD:}"
+
+# hugmesh-federation-api — this BFF is a reactive WebClient CLIENT of it. Default
+# is the in-cluster service DNS; overridable per env. The caller's Casdoor bearer is
+# forwarded on every call (see BearerForwardingFilter) so federation-api authorises
+# the original moderator.
+federation-api:
+  base-url: "${FEDERATION_API_BASE_URL:http://hugmesh-federation-api.hugmesh-backend.svc.cluster.local:8080}"
+
+# hugmesh-admin-bff-api — the MOD ban/lift surface writes the access_suspension
+# DESIRED-STATE here (admin-bff owns the route-access DB + the single-writer reconcile
+# loop). Reuses the same mTLS client-presentation (hugmesh.mtls.client.*) + the
+# caller's bearer forwarding as the federation WebClient.
+admin-bff:
+  base-url: "${ADMIN_BFF_BASE_URL:http://hugmesh-admin-bff-api.hugmesh-backend.svc.cluster.local:8080}"
+
+# Casdoor role lookup for the non-privileged target guard (a MOD may not ban a
+# ROLE_ADMIN/ROLE_MOD). Reaches Casdoor THROUGH the hugmesh-pki gateway with HTTP
+# Basic client-credentials, mirroring admin-bff. GATED: casdoor.admin.enabled default
+# false so a Casdoor-less dev/CI run boots clean (the guard then resolves to
+# "not privileged"; the always-on self-ban + method/gateway gates still apply).
+casdoor:
+  gateway-base: "${PKI_GATEWAY_BASE:http://hugmesh-pki-gateway.hugmesh-pki.svc.cluster.local:8080}"
+  organization: "${CASDOOR_ORG:hugmesh}"
+  client-id: "${CASDOOR_CLIENT_ID:}"
+  client-secret: "${CASDOOR_CLIENT_SECRET:}"
+  admin:
+    enabled: "${CASDOOR_ADMIN_ENABLED:false}"
+  # Per-brand domain -> Casdoor-org map for the CROSS-DOMAIN moderation guard: the
+  # privileged-target + same-tenant lookups key off the CALLER's brand org so a brand-X
+  # MOD's reads never see another brand's users. OPT-IN: empty = single-tenant (everyone
+  # uses casdoor.organization). Format: comma-separated domain=org pairs — the domain
+  # side MUST match the DOMAIN_<x> derived from app.tenancy.issuers (same brand keys).
+  org-map: "${CASDOOR_ORG_MAP:}"
+
+# Circuit breakers for the OUTBOUND ban legs. A stalled/erroring admin-bff (the
+# desired-state write) or homeserver (the doBlock seam) trips the breaker; the
+# fallback returns a DEGRADED outcome (never a success), so the ban/block endpoint
+# degrades to 202 pending-reconcile, NEVER a 200 "blocked". Same tuning shape as
+# admin-bff / hugmesh-actions.
+resilience4j:
+  circuitbreaker:
+    instances:
+      admin-bff:
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 30s
+        permitted-number-of-calls-in-half-open-state: 3
+      akkoma:
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 30s
+        permitted-number-of-calls-in-half-open-state: 3
+      tuwunel:
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 30s
+        permitted-number-of-calls-in-half-open-state: 3
+
+# ── API-to-API mTLS (CLIENT side / OUTBOUND) ─────────────────────────────────
+# The OTHER half of the server.ssl.* enforcement below: when federation-api flips
+# its server-side client-auth=need, THIS BFF must present a client cert that chains
+# to the cluster CA on its outbound federation-api calls. FederationHttpClientSsl
+# builds a reactor-netty connector that presents this BFF's PKI client identity
+# (keystore.p12) and trusts the cluster CA (truststore.p12). It REUSES the same
+# SSL_* env the server-side stores use — one mounted /stores layout serves both
+# directions. DEFAULT OFF: local/dev/CI (plain http, no stores) is unaffected; the
+# in-cluster deployment sets HUGMESH_MTLS_CLIENT_ENABLED=true alongside the
+# server-side SSL_CLIENT_AUTH=need.
+hugmesh:
+  mtls:
+    client:
+      enabled: "${HUGMESH_MTLS_CLIENT_ENABLED:false}"
+      key-store: "${SSL_KEY_STORE:/stores/keystore.p12}"
+      key-store-type: "${SSL_KEY_STORE_TYPE:PKCS12}"
+      key-store-password: "${SSL_KEY_STORE_PASSWORD:}"
+      trust-store: "${SSL_TRUST_STORE:/stores/truststore.p12}"
+      trust-store-type: "${SSL_TRUST_STORE_TYPE:PKCS12}"
+      trust-store-password: "${SSL_TRUST_STORE_PASSWORD:}"
+
+# External homeserver admin clients. Base URLs default to the in-cluster service DNS
+# grounded in hugmesh-generator manifests (tuwunel :8008, akkoma :4000). The akkoma
+# (mastodon) leg is WIRED to the confirmed pleroma-admin verbs (PATCH /users/deactivate,
+# DELETE /instances/{host}); the tuwunel (matrix) leg stays a flag-gated structured stub
+# (no HTTP admin API — admin-room bot only). Both enabled flags default FALSE so a
+# homeserver-less run boots clean and merging is INERT; flipping mastodon true also needs
+# admin-token to be present (else it degrades, never issuing an unauthenticated call).
+#
+# LIVE-STACK VERIFIED (2026-07, local compose stack, MASTODON_ADMIN_ENABLED=true in a
+# LOCAL run only — this shipped default stays false): mainline Mastodon 4.3.1 (the
+# stack's Akkoma stand-in) has NO /api/v1/pleroma/* routes, so only the DEGRADED
+# envelope is verifiable there — and it now holds honestly: block-user vs the 404ing
+# endpoint → degraded:http-404 (never OK), and vs the force-HTTPS redirect on the
+# plain-HTTP port → degraded:http-308 (never OK; 308 is the method-preserving redirect
+# Mastodon issues for PATCH/DELETE) on both legs. Block-instance keeps 404→OK by
+# design (Akkoma already-purged idempotency), which is exactly why this flag must only
+# ever be flipped against a REAL Akkoma. The pleroma-admin happy path (200) still needs
+# a real Akkoma to confirm.
+external:
+  matrix:
+    base-url: "${MATRIX_BASE_URL:http://tuwunel.hugmesh-backend.svc.cluster.local:8008}"
+    enabled: "${MATRIX_ADMIN_ENABLED:false}"
+  mastodon:
+    base-url: "${MASTODON_BASE_URL:http://akkoma.hugmesh-backend.svc.cluster.local:4000}"
+    enabled: "${MASTODON_ADMIN_ENABLED:false}"
+    # akkoma admin bearer — injected from Vault hugmesh/akkoma-admin (property "token")
+    # via the ESO ExternalSecret 'akkoma-admin' in ns hugmesh-backend. Empty default;
+    # NEVER inline the token. Blank token => block degrades (never a false 200 OK).
+    admin-token: "${MASTODON_ADMIN_TOKEN:}"
+
+# SpringDoc OpenAPI. The spec at /v3/api-docs is the source the platform
+# ng-openapi-gen typed clients, the paired hugmesh-mod-ui federated module, and
+# the docs pipeline consume. Spec + UI are gated by SecurityConfig: permitAll under
+# the dev/test profile (so `gen:fetch` can curl the spec without a token) and
+# ROLE_ADMIN otherwise (prod) — so leaving them enabled here is safe in every
+# environment. Mirrors the admin-bff springdoc block.
+springdoc:
+  # Force a concrete JSON media type on operations that declare no explicit `produces`.
+  # WHY: ng-openapi-gen maps a `*/*` response content type to a Blob (binary) return,
+  # which breaks typed JSON parsing in the generated client. Pinning application/json
+  # makes the generated mod-UI client deserialize these JSON bodies correctly. Any
+  # endpoint that explicitly produces application/octet-stream (binary download) keeps
+  # its own `produces` and is unaffected.
+  default-produces-media-type: application/json
+  api-docs:
+    enabled: true
+    path: /v3/api-docs
+    # Pin the dumped spec to OpenAPI 3.0.1. WHY: springdoc-openapi 3.x (Boot 4)
+    # defaults to emitting 3.1.0, whose `type` arrays break ng-openapi-gen 0.51.0
+    # ("TypeError: type.startsWith is not a function"). Mirrors admin-bff #109.
+    version: openapi_3_0
+  swagger-ui:
+    enabled: true
+    path: /swagger-ui.html
+  # Restrict the component scan to this BFF's own controllers so the spec stays the
+  # mod-BFF surface only (no stray springframework/actuator paths leak in).
+  packages-to-scan: systems.hugmesh.modbff
+  # Drop the REDUNDANT trailing-slash alias of the domain-lock/unlock routes from the
+  # SPEC ONLY. Those endpoints map TWO paths to one method
+  # ({@code "/domain-lock/{role}/{user}"} + the trailing-slash variant) so WebFlux
+  # accepts a trailing slash at runtime; springdoc otherwise emits each alias as a
+  # SEPARATE operation, suffixing the duplicate operationId with {@code _1}
+  # ({@code domainLockUser_1}) — an ugly, ambiguous generated client method. Excluding
+  # the alias from the document yields one clean {@code domainLockUser}/{@code domainUnlockUser}
+  # per verb. PURELY a doc filter: the runtime route mappings are UNTOUCHED, so the
+  # trailing-slash URL still resolves exactly as before.
+  paths-to-exclude: /bff/mod/domain-lock/{role}/{user}/
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+
+server:
+  port: 8080
+  # ── API-to-API mTLS enforcement (server side) ──────────────────────────────
+  # When the in-cluster keystore initContainer is mounted (the gateway-chart
+  # build-keystore equivalent: PKCS12 keystore.p12 = this service's Vault-PKI
+  # identity + truststore.p12 = the cluster CA), the deployment flips these on so
+  # the TLS handshake REQUIRES a client cert that chains to the cluster CA. A
+  # caller that was NOT deployed+signed by our Vault/ESO PKI process holds no such
+  # cert, so its handshake is rejected — it cannot read or call this API at all.
+  #
+  # Defaults keep local/dev/CI working: ssl.enabled=false (plaintext) and
+  # client-auth=none, so the truststore is never opened and existing tests are
+  # unaffected. In-cluster, the deployment sets SSL_ENABLED=true,
+  # SSL_CLIENT_AUTH=need and points the key-store/trust-store at the mounted
+  # PKCS12 stores (default paths below match the gateway chart's /stores layout).
+  # The store passwords are generated in-pod and injected via env (never in git).
+  ssl:
+    enabled: "${SSL_ENABLED:false}"
+    client-auth: "${SSL_CLIENT_AUTH:none}"
+    key-store: "${SSL_KEY_STORE:/stores/keystore.p12}"
+    key-store-type: "${SSL_KEY_STORE_TYPE:PKCS12}"
+    key-store-password: "${SSL_KEY_STORE_PASSWORD:}"
+    trust-store: "${SSL_TRUST_STORE:/stores/truststore.p12}"
+    trust-store-type: "${SSL_TRUST_STORE_TYPE:PKCS12}"
+    trust-store-password: "${SSL_TRUST_STORE_PASSWORD:}"
+    # TLSv1.3 floor (forward-secret, AEAD-only) — matches the gateway chart.
+    enabled-protocols: "${SSL_ENABLED_PROTOCOLS:TLSv1.3}"
+
+app:
+  # Per-brand Casdoor issuers for multi-tenant mode. OPT-IN: empty = single-issuer.
+  # Format: comma-separated issuerUri=domainName pairs.
+  # When non-empty, TenancyResourceServerConfig activates; unknown issuers → 401.
+  tenancy:
+    issuers: "${APP_TENANCY_ISSUERS:}"
+
+  # BffCookieAuthenticationWebFilter — bridges an opaque bff_ session token into THIS
+  # service's OWN Spring Security context, over admin-bff's
+  # GET /bff/internal/session/introspect (mirrors the gateway's own BffSessionAuthFilter
+  # call; admin-bff-api's own local BffCookieAuthenticationWebFilter closed the same gap
+  # via a direct AccountStore call instead, which mod-bff-api cannot do — no local
+  # accounts/bff_session DB access). Reuses the SAME app.bff-session.* namespace the
+  # gateway's BffSessionConfig/BffSessionProperties use for the identical call, so one
+  # INTERNAL_TOKEN secret covers both services. No enabled flag: unlike the gateway's
+  # opt-in bridge (a NEW feature there), this is a security FIX for an existing gate — it
+  # is unconditionally wired, and degrades to pass-through-unauthenticated whenever no
+  # bff_ token is presented (a real JWT request never triggers a call here at all).
+  bff-session:
+    # Must match app.internal.token on admin-bff-api (InternalTokenWebFilter). Blank in
+    # dev/test/CI (admin-bff's filter is then non-enforcing too); set INTERNAL_TOKEN in
+    # every environment where admin-bff-api enforces it.
+    internal-token: "${INTERNAL_TOKEN:}"
+    internal-token-header: "${APP_BFF_SESSION_INTERNAL_TOKEN_HEADER:X-Internal-Token}"
+    # Timeout for the introspect call. A bff_ token that cannot be validated within this
+    # window fails CLOSED (503) — see BffCookieAuthenticationWebFilter's class doc.
+    timeout-ms: "${APP_BFF_SESSION_TIMEOUT_MS:2000}"
+
+  # BearerForwardingFilter's native-login (bff_) -> custody-JWT exchange, for a native-login
+  # MOD/ADMIN's calls to federation-api / admin-bff-api's public surface / owncast-bff-api. SHIPS
+  # DARK: enabled=false (default) => SessionExchangeConfig's beans do not exist => zero extra
+  # network calls, and a native-login caller's downstream request carries NO Authorization header
+  # — byte-identical to pre-fix behaviour. This flag is SEPARATE FROM (and must be turned on IN
+  # ADDITION TO) admin-bff-api's app.bff.custody-key + app.bff.oidc.enabled (auth-core) — those gate
+  # whether admin-bff-api's POST /bff/internal/session/exchange can serve a real Bearer at all; THIS
+  # flag gates whether BearerForwardingFilter even ATTEMPTS to call it. Enabling this alone (without
+  # custody configured on admin-bff-api) is harmless but pointless: every attempt 503s ("custody
+  # disabled") and the filter still falls through to no header, after one extra in-cluster round
+  # trip. Reuses the SAME adminBffInternalWebClient (base URL + internal-token above) already wired
+  # for session introspection — see SessionExchangeConfig's class javadoc for the full contract.
+  bff-exchange:
+    enabled: "${APP_BFF_EXCHANGE_ENABLED:false}"
+    # Positive-swap cache: sha256(bff_ token) -> custody JWT, mirrors the gateway's
+    # BffJwtExchangeWebFilter cache exactly. The TTL IS the suspension-bypass window (a cache hit
+    # skips the exchange endpoint's own suspensionGate() re-check) — hard-clamped to a 60s ceiling
+    # regardless of this value; <=0 disables the cache entirely (zero suspension-bypass window, one
+    # exchange call per request).
+    cache-ttl-ms: "${APP_BFF_EXCHANGE_CACHE_TTL_MS:5000}"
+    cache-max-size: "${APP_BFF_EXCHANGE_CACHE_MAX_SIZE:10000}"
+    # Timeout for the exchange call. A transient failure here degrades to no Authorization header
+    # (soft fail-open) — see SessionExchangeService's class javadoc for why that is the correct
+    # posture here (every downstream this BFF forwards to has its own independent fail-closed gate).
+    request-timeout-ms: "${APP_BFF_EXCHANGE_REQUEST_TIMEOUT_MS:3000}"
+
+  # TEST/SEED-ONLY: POST /bff/mod/findings/test-seed (TestSeedFindingController) lets an
+  # authenticated MOD/ADMIN caller file a REAL system_finding row through the SAME
+  # federation-api production write path (POST /api/federation/findings) the upstream
+  # user-bff pre-publish avatar-vision check drives — no parallel write, no hand-rolled
+  # insert. federation-api's file() endpoint is self-only (subject = the forwarded JWT's
+  # own subject, never a request field), so the seeded finding's content-owner is the
+  # CALLING mod/admin themselves; no cross-user spoof capability is introduced. SHIPS
+  # DARK: enabled=false (the default, and the only setting in production) ⇒ every call is
+  # a real 503, not a silent no-op. Flip APP_TEST_SEED_ENABLED=true ONLY in the e2e/dev
+  # compose+cluster profile so mod-ui Playwright specs can seed a deterministic HELD
+  # finding to drive the Confirm/Dismiss resolve round-trip without a live edge-AI vision
+  # check. Same idiom as hugmesh-user-bff-api's app.test-seed.enabled (notifications).
+  test-seed:
+    enabled: "${APP_TEST_SEED_ENABLED:false}"

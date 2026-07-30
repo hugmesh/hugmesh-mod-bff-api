@@ -1,0 +1,106 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+            http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.29.xsd">
+
+    <!--
+      Phase-2 ban surface (access-role suspension). The MOD ban/lift endpoints write
+      the access_suspension DESIRED-STATE in admin-bff (which owns the route-access DB
+      + the single-writer reconcile loop) and record the intent in this BFF's OWN
+      mod_action audit table. This changeset extends mod_action to carry the ban shape
+      and — critically — adds a CLIENT DEDUP KEY so an at-least-once redelivery of the
+      same ban does NOT double-effect (the FederationApiClient/admin-bff submit is
+      at-least-once; a deterministic key + an idempotent upsert makes a retry a no-op).
+
+        003a — columns      (dedup_key, ban_type, expires_at, propagation_state)
+        003b — dedup unique  (idempotency: one row per deterministic action key)
+        003c — action CHECK  (widen ck_mod_action_action with access.suspend/restore)
+        003d — platform CHECK (widen ck_mod_action_platform with 'access')
+
+      Portable DDL (PostgreSQL + the H2 PostgreSQL-compat test store): plain
+      ALTER TABLE / addColumn / createIndex with DROP+re-ADD for the widened CHECKs,
+      each in its own changeSet so a redeploy reports them independently.
+    -->
+
+    <changeSet id="003-mod-action-ban-columns" author="hugmesh">
+        <comment>Add the ban-shape + dedup columns to mod_action.</comment>
+        <!-- Deterministic client idempotency key (actor|action|platform|target|
+             window). NULL for legacy rows (block/refer/recommend never set it); the
+             unique index below is partial so only ban rows are deduped. -->
+        <addColumn tableName="mod_action">
+            <column name="dedup_key" type="varchar(255)"/>
+            <!-- user | instance | profile — the kind of ban target. -->
+            <column name="ban_type" type="varchar(32)"/>
+            <!-- TTL: null = permanent ban; otherwise the auto-restore instant the
+                 admin-bff expiry scan reads. -->
+            <column name="expires_at" type="timestamp"/>
+            <!-- pending | applied | failed — the homeserver/desired-state propagation
+                 result. A STUBBED/degraded/breaker-open ban is 'pending' (NEVER
+                 'applied'), so the audit row never claims a block that did not land. -->
+            <column name="propagation_state" type="varchar(16)"/>
+        </addColumn>
+    </changeSet>
+
+    <changeSet id="003-mod-action-dedup-unique" author="hugmesh">
+        <comment>Idempotency: at most one row per non-null dedup_key (ban retries are no-ops).</comment>
+        <!-- A PLAIN unique index on dedup_key (NOT a partial WHERE index — H2 does not
+             support partial indexes). This is exactly equivalent for the dedup purpose:
+             standard SQL treats NULLs as DISTINCT in a unique index, so the existing
+             block/refer/recommend rows (dedup_key NULL) all coexist freely, while the
+             ban surface's non-null dedup_key is forced unique. Both PostgreSQL and the
+             H2 PostgreSQL-compat test store allow multiple NULLs under a unique index,
+             so the same DDL applies on both. The INSERT ... ON CONFLICT (dedup_key)
+             DO NOTHING in ModActionRepository.recordBan targets this index. -->
+        <createIndex tableName="mod_action" indexName="uq_mod_action_dedup_key" unique="true">
+            <column name="dedup_key"/>
+        </createIndex>
+        <rollback>
+            <dropIndex tableName="mod_action" indexName="uq_mod_action_dedup_key"/>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="003-mod-action-action-check-ban" author="hugmesh">
+        <comment>Widen ck_mod_action_action with the access.suspend/access.restore ban verbs.</comment>
+        <sql>ALTER TABLE mod_action DROP CONSTRAINT ck_mod_action_action</sql>
+        <sql>
+            ALTER TABLE mod_action
+                ADD CONSTRAINT ck_mod_action_action
+                CHECK (action IN (
+                    'matrix.block-user', 'matrix.block-instance',
+                    'mastodon.block-user', 'mastodon.block-instance',
+                    'federation.refer', 'federation.recommend',
+                    'access.suspend', 'access.restore'))
+        </sql>
+        <rollback>
+            <sql>ALTER TABLE mod_action DROP CONSTRAINT ck_mod_action_action</sql>
+            <sql>
+                ALTER TABLE mod_action
+                    ADD CONSTRAINT ck_mod_action_action
+                    CHECK (action IN (
+                        'matrix.block-user', 'matrix.block-instance',
+                        'mastodon.block-user', 'mastodon.block-instance',
+                        'federation.refer', 'federation.recommend'))
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="003-mod-action-platform-check-access" author="hugmesh">
+        <comment>Widen ck_mod_action_platform with the 'access' platform (access-role ban).</comment>
+        <sql>ALTER TABLE mod_action DROP CONSTRAINT ck_mod_action_platform</sql>
+        <sql>
+            ALTER TABLE mod_action
+                ADD CONSTRAINT ck_mod_action_platform
+                CHECK (platform IN ('matrix', 'mastodon', 'federation', 'access'))
+        </sql>
+        <rollback>
+            <sql>ALTER TABLE mod_action DROP CONSTRAINT ck_mod_action_platform</sql>
+            <sql>
+                ALTER TABLE mod_action
+                    ADD CONSTRAINT ck_mod_action_platform
+                    CHECK (platform IN ('matrix', 'mastodon', 'federation'))
+            </sql>
+        </rollback>
+    </changeSet>
+</databaseChangeLog>

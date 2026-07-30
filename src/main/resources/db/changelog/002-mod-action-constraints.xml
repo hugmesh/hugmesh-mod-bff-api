@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+            http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.29.xsd">
+
+    <!--
+      Security hardening: push the ENUM membership the API already enforces in
+      ModController + ModActionType down into the database as CHECK constraints, so
+      the mod_action audit trail cannot hold a row outside the closed vocabulary
+      even if a future code path (or a manual INSERT) bypasses the controller. This
+      closes the API<->DB parity gap where `platform` and `action` were API-validated
+      but only NOT-NULL varchar at the DB level.
+
+        - platform : matrix | mastodon | federation
+                     (ModController.isPlatform + the federation.* recommend/refer path)
+        - action   : the six ModActionType verbs
+                     (matrix/mastodon block-user/block-instance, federation refer/recommend)
+
+      `result` is deliberately NOT constrained to an enum — it is `stubbed` | `ok` |
+      `degraded:<reason>` where the degraded form carries an open-ended reason
+      suffix, so an IN(...) list would be wrong. It stays NOT NULL (changeset 001).
+
+      Portable DDL: a plain ALTER TABLE ... ADD CONSTRAINT ... CHECK (col IN (...))
+      runs identically on PostgreSQL and on the H2 (PostgreSQL-compat) test store,
+      so a single per-dbms-neutral <sql> block covers both. Split into two
+      changeSets so a redeploy reports each constraint independently.
+    -->
+
+    <changeSet id="002-mod-action-platform-check" author="hugmesh">
+        <comment>CHECK: mod_action.platform is one of the known platforms.</comment>
+        <sql>
+            ALTER TABLE mod_action
+                ADD CONSTRAINT ck_mod_action_platform
+                CHECK (platform IN ('matrix', 'mastodon', 'federation'))
+        </sql>
+        <rollback>
+            ALTER TABLE mod_action DROP CONSTRAINT ck_mod_action_platform
+        </rollback>
+    </changeSet>
+
+    <changeSet id="002-mod-action-action-check" author="hugmesh">
+        <comment>CHECK: mod_action.action is one of the ModActionType verbs.</comment>
+        <sql>
+            ALTER TABLE mod_action
+                ADD CONSTRAINT ck_mod_action_action
+                CHECK (action IN (
+                    'matrix.block-user', 'matrix.block-instance',
+                    'mastodon.block-user', 'mastodon.block-instance',
+                    'federation.refer', 'federation.recommend'))
+        </sql>
+        <rollback>
+            ALTER TABLE mod_action DROP CONSTRAINT ck_mod_action_action
+        </rollback>
+    </changeSet>
+</databaseChangeLog>

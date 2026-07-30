@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+            http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.29.xsd">
+
+    <!--
+      Multi-tenant DOMAIN scoping of the audit trail (foundation auth). Each mod_action
+      row is now stamped with the acting moderator's brand/domain — derived from the
+      moderator's CRYPTOGRAPHICALLY-VALIDATED token issuer (the DOMAIN_<x> authority the
+      shared CasdoorAuthorities converter emits), NEVER a user-settable claim. The
+      domain-scoped audit reads filter on this column so a mod of brand-X can only see
+      brand-X's rows; a SUPERADMIN (the cross-domain infra control plane) reads with NO
+      predicate and sees every domain.
+
+      Back-compat: the column DEFAULTS to 'default' (DomainRegistry.DEFAULT_DOMAIN), so
+      a single-issuer cluster — where every token resolves to DOMAIN_default — keeps one
+      domain and every existing/legacy row reads back as 'default'. The column is NOT
+      NULL so a row can never be un-scoped (an un-scoped row would be invisible to a
+      scoped read AND, worse, ambiguous to a cross-domain read).
+
+        005a — domain column   (NOT NULL DEFAULT 'default'; back-fills legacy rows)
+        005b — domain index    (actor/domain-scoped audit reads stay index-backed)
+
+      Portable DDL (PostgreSQL + the H2 PostgreSQL-compat test store): plain addColumn
+      with a default + createIndex.
+    -->
+
+    <changeSet id="005-mod-action-domain-column" author="hugmesh">
+        <comment>Stamp each audit row with the acting moderator's brand/domain (issuer-derived).</comment>
+        <addColumn tableName="mod_action">
+            <!-- The brand/domain the acting moderator is scoped to, from the validated
+                 token issuer (DomainRegistry). 'default' on single-issuer clusters and
+                 for every pre-existing/legacy row. Sanitised lowercase token like the
+                 DomainRegistry domain value. -->
+            <column name="domain" type="varchar(64)" defaultValue="default">
+                <constraints nullable="false"/>
+            </column>
+        </addColumn>
+    </changeSet>
+
+    <changeSet id="005-mod-action-domain-index" author="hugmesh">
+        <comment>Index the domain (+ ts) so the domain-scoped audit reads stay index-backed.</comment>
+        <createIndex tableName="mod_action" indexName="idx_mod_action_domain_ts">
+            <column name="domain"/>
+            <column name="ts"/>
+        </createIndex>
+        <rollback>
+            <dropIndex tableName="mod_action" indexName="idx_mod_action_domain_ts"/>
+        </rollback>
+    </changeSet>
+</databaseChangeLog>

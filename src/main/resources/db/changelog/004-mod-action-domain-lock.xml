@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+            http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.29.xsd">
+
+    <!--
+      Domain-lock surface (ADD-semantics, force local-only / no-federation). The MOD
+      domain-lock/unlock endpoints write the SEPARATE domain_lock DESIRED-STATE in
+      admin-bff (which owns that table + the single-writer reconcile loop) and record
+      the intent in this BFF's OWN mod_action audit table. Domain-lock is an ADDITIVE
+      marker (ROLE_MATRIX_DOMAINLOCKED / ROLE_MASTODON_DOMAINLOCKED) — the locked user
+      KEEPS ROLE_MATRIX/ROLE_MASTODON — so it is a DIFFERENT verb from the
+      REMOVE-semantics access.suspend/restore ban, and recorded under its OWN
+      'domain-lock' platform value (sibling of the ban surface's 'access').
+
+      No new COLUMNS are needed: a domain-lock row reuses the ban-shape columns
+      (dedup_key for idempotency, ban_type='user', propagation_state='pending'). This
+      changeset only WIDENS the two CHECK constraints (last redefined in 003) so the
+      audit trail can hold the new verbs + platform:
+
+        004a — action CHECK   (widen ck_mod_action_action with domain.lock/domain.unlock)
+        004b — platform CHECK (widen ck_mod_action_platform with 'domain-lock')
+
+      Portable DDL (PostgreSQL + the H2 PostgreSQL-compat test store): DROP the existing
+      CHECK and re-ADD the widened one, each in its own changeSet so a redeploy reports
+      them independently. The rollback restores the 003-era CHECK (with the ban verbs +
+      'access' platform, WITHOUT the domain-lock additions).
+    -->
+
+    <changeSet id="004-mod-action-action-check-domain-lock" author="hugmesh">
+        <comment>Widen ck_mod_action_action with the domain.lock/domain.unlock verbs.</comment>
+        <sql>ALTER TABLE mod_action DROP CONSTRAINT ck_mod_action_action</sql>
+        <sql>
+            ALTER TABLE mod_action
+                ADD CONSTRAINT ck_mod_action_action
+                CHECK (action IN (
+                    'matrix.block-user', 'matrix.block-instance',
+                    'mastodon.block-user', 'mastodon.block-instance',
+                    'federation.refer', 'federation.recommend',
+                    'access.suspend', 'access.restore',
+                    'domain.lock', 'domain.unlock'))
+        </sql>
+        <rollback>
+            <sql>ALTER TABLE mod_action DROP CONSTRAINT ck_mod_action_action</sql>
+            <sql>
+                ALTER TABLE mod_action
+                    ADD CONSTRAINT ck_mod_action_action
+                    CHECK (action IN (
+                        'matrix.block-user', 'matrix.block-instance',
+                        'mastodon.block-user', 'mastodon.block-instance',
+                        'federation.refer', 'federation.recommend',
+                        'access.suspend', 'access.restore'))
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="004-mod-action-platform-check-domain-lock" author="hugmesh">
+        <comment>Widen ck_mod_action_platform with the 'domain-lock' platform.</comment>
+        <sql>ALTER TABLE mod_action DROP CONSTRAINT ck_mod_action_platform</sql>
+        <sql>
+            ALTER TABLE mod_action
+                ADD CONSTRAINT ck_mod_action_platform
+                CHECK (platform IN ('matrix', 'mastodon', 'federation', 'access', 'domain-lock'))
+        </sql>
+        <rollback>
+            <sql>ALTER TABLE mod_action DROP CONSTRAINT ck_mod_action_platform</sql>
+            <sql>
+                ALTER TABLE mod_action
+                    ADD CONSTRAINT ck_mod_action_platform
+                    CHECK (platform IN ('matrix', 'mastodon', 'federation', 'access'))
+            </sql>
+        </rollback>
+    </changeSet>
+</databaseChangeLog>

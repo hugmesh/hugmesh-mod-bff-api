@@ -1,0 +1,177 @@
+# mod-bff — the Backend-For-Frontend the hugmesh-mod-ui talks to for the
+# moderation surfaces (/bff/mod/**). It owns the mod_action audit table in its
+# OWN dedicated Postgres (mod-bff-db) and calls federation-api (as a JWT-bearing
+# WebClient) to drive moderation_requests on the module-federation registry.
+#
+# It is a ClusterIP-only service in hugmesh-backend: nothing reaches it from
+# outside except via the fe-gateway, which routes same-origin /bff/mod/** to it
+# AND enforces the Casdoor role rules (/bff/mod/** => ROLE_MOD, +ADMIN superset)
+# from the route DB first.
+#
+# Security model: like federation-api, mod-bff is purely an OAuth2 RESOURCE
+# SERVER. It VALIDATES the cluster Casdoor JWT itself (CASDOOR_ISSUER_URI, JWKS
+# auto-discovered) and FORWARDS the caller's bearer token onward to federation-api
+# — it mints/holds NO outbound client creds, so it needs NO Casdoor app or client
+# secret of its own.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hugmesh-mod-bff-api
+  namespace: hugmesh-backend
+  labels: { app: hugmesh-mod-bff-api, app.kubernetes.io/part-of: hugmesh.systems }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: hugmesh-mod-bff-api } }
+  template:
+    metadata: { labels: { app: hugmesh-mod-bff-api } }
+    spec:
+      nodeSelector: { hugmesh.systems/backend: "true" }
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile: { type: RuntimeDefault }
+        seLinuxOptions:
+          type: container_t
+          level: "s0:c27"
+      # ── API-to-API mTLS identity (build-keystore) ───────────────────────────
+      # Mirrors the hugmesh-gateway chart's build-keystore initContainer: turns
+      # the Vault-PKI-issued, ESO-synced TLS Secret (hugmesh-mod-bff-api-mtls:
+      # tls.crt/tls.key/ca.crt) into keystore.p12 (identity) + truststore.p12
+      # (cluster CA) for the server.ssl.* config to REQUIRE a client cert chaining
+      # to the cluster CA. Store password generated in-pod, kept only in the tmpfs
+      # /stores emptyDir, emitted into application-tls.properties loaded via
+      # SPRING_CONFIG_ADDITIONAL_LOCATION — never in git / a Secret / the pod spec.
+      initContainers:
+        - name: build-keystore
+          image: hugmesh-systems/mod-bff-api:dev
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              P="$(openssl rand -base64 24 | tr -d '/+=' | cut -c1-24)"
+              openssl pkcs12 -export -inkey /pki/tls.key -in /pki/tls.crt \
+                -certfile /pki/ca.crt -name hugmesh-mod-bff-api \
+                -out /stores/keystore.p12 -passout "pass:${P}"
+              keytool -importcert -noprompt -alias hugmesh-cluster-ca \
+                -file /pki/ca.crt -keystore /stores/truststore.p12 \
+                -storetype PKCS12 -storepass "${P}"
+              umask 077
+              cat > /stores/application-tls.properties <<EOF
+              server.ssl.key-store-password=${P}
+              server.ssl.trust-store-password=${P}
+              EOF
+              echo "keystore + truststore + application-tls.properties built"
+          volumeMounts:
+            - { name: pki,    mountPath: /pki, readOnly: true }
+            - { name: stores, mountPath: /stores }
+      containers:
+        - name: hugmesh-mod-bff-api
+          image: hugmesh-systems/mod-bff-api:dev
+          ports: [{ name: http, containerPort: 8080 }]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          env:
+            # ── API-to-API mTLS (server side) ─────────────────────────────────
+            # Require a client cert chaining to the cluster CA. Store passwords come
+            # from /stores/application-tls.properties (in-pod generated, loaded via
+            # SPRING_CONFIG_ADDITIONAL_LOCATION) so they never enter the pod spec.
+            # DEPLOY-ORDER: deploy with the gateway/BFF client-cert wave (see PR body).
+            - { name: SSL_ENABLED,          value: "true" }
+            - { name: SSL_CLIENT_AUTH,      value: "need" }
+            - { name: SSL_KEY_STORE,        value: "/stores/keystore.p12" }
+            - { name: SSL_KEY_STORE_TYPE,   value: "PKCS12" }
+            - { name: SSL_TRUST_STORE,      value: "/stores/truststore.p12" }
+            - { name: SSL_TRUST_STORE_TYPE, value: "PKCS12" }
+            - { name: SPRING_CONFIG_ADDITIONAL_LOCATION, value: "file:/stores/" }
+            # OAuth2 resource server: validate the cluster Casdoor JWT itself.
+            # JWKS auto-discovered from the issuer well-known; no jwk-set-uri /
+            # client secret needed (pure resource server, like federation-api).
+            - name: CASDOOR_ISSUER_URI
+              value: "https://id.hugmesh.systems"
+            # WebClient to the federation-api module-federation registry (the
+            # mod BFF drives moderation_requests there, forwarding the caller JWT).
+            - name: FEDERATION_API_URL
+              value: "http://hugmesh-federation-api.hugmesh-backend.svc.cluster.local:8080"
+            # Config datastore: the mod_action audit table. The app's
+            # application.yml defaults spring.r2dbc + spring.liquibase to a literal
+            # `hugmesh-pg` host that does NOT exist; OVERRIDE both here to the
+            # dedicated mod-bff-db (mirrors how admin-bff/federation override to
+            # their dedicated dbs). R2DBC is the runtime handle; the JDBC handle is
+            # used by Liquibase ONCE at startup. Password sourced from Vault via
+            # External Secrets (ESO Secret mod-bff-db-auth, key password) — the SAME
+            # Secret the mod-bff-db pod's POSTGRES_PASSWORD mounts, so the DB and its
+            # consumer stay in sync.
+            # RUNTIME handle: log in as the dedicated NON-OWNER least-privilege role
+            # `modbff_app` (DML only, no DDL), created by mod-bff-db's
+            # initdb/10-roles.sh. Password from its OWN ESO Secret
+            # mod-bff-db-app-auth (the SAME the DB pod's MODBFF_APP_PASSWORD mounts).
+            - name: SPRING_R2DBC_URL
+              value: "r2dbc:postgresql://mod-bff-db.hugmesh-backend.svc.cluster.local:5432/modbff"
+            - name: SPRING_R2DBC_USERNAME
+              value: "modbff_app"
+            - name: SPRING_R2DBC_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mod-bff-db-app-auth
+                  key: password
+            # JDBC handle used ONLY by Liquibase at startup. DDL needs the OWNER, so
+            # Liquibase keeps the owner role `modbff` + the owner ESO Secret
+            # mod-bff-db-auth (the SAME the DB pod's POSTGRES_PASSWORD mounts).
+            - name: SPRING_LIQUIBASE_URL
+              value: "jdbc:postgresql://mod-bff-db.hugmesh-backend.svc.cluster.local:5432/modbff"
+            - name: SPRING_LIQUIBASE_USER
+              value: "modbff"
+            - name: SPRING_LIQUIBASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mod-bff-db-auth
+                  key: password
+          # HTTPS exec probe: client-auth=need rejects a cert-less kubelet httpGet,
+          # so curl PRESENTS this pod's client cert and validates the server cert
+          # against the cluster CA (--resolve maps the SAN to loopback). See
+          # admin-bff-api for the rationale.
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -ec
+                - >-
+                  curl -sf --cert /pki/tls.crt --key /pki/tls.key --cacert /pki/ca.crt
+                  --resolve hugmesh-mod-bff-api:8080:127.0.0.1
+                  https://hugmesh-mod-bff-api:8080/actuator/health/readiness
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -ec
+                - >-
+                  curl -sf --cert /pki/tls.crt --key /pki/tls.key --cacert /pki/ca.crt
+                  --resolve hugmesh-mod-bff-api:8080:127.0.0.1
+                  https://hugmesh-mod-bff-api:8080/actuator/health/liveness
+            initialDelaySeconds: 45
+            periodSeconds: 15
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits:   { cpu: "1",  memory: 768Mi }
+          volumeMounts:
+            - { name: tmp,    mountPath: /tmp }
+            - { name: stores, mountPath: /stores, readOnly: true }
+            - { name: pki,    mountPath: /pki,    readOnly: true }
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        # Vault-PKI-issued mTLS material, synced by ESO (kubernetes.io/tls).
+        - name: pki
+          secret:
+            secretName: hugmesh-mod-bff-api-mtls
+        # tmpfs for the assembled PKCS12 stores + the in-pod SSL properties.
+        - name: stores
+          emptyDir:
+            medium: Memory

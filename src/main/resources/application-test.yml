@@ -1,0 +1,39 @@
+# Test profile: no live datastore / Casdoor / federation-api / homeservers.
+#
+# The slice + context-load tests provide their own wiring:
+#   - the R2DBC audit repository slice (@DataR2dbcTest) imports TestDatabaseConfig,
+#     an H2 (PostgreSQL-compat) store that Liquibase applies the REAL changelog over
+#     and that the reactive DatabaseClient queries — so Spring Boot's own
+#     R2DBC/Liquibase auto-config is disabled here to avoid dialing real Postgres;
+#   - the @WebFluxTest controller tests mock the clients + a ReactiveJwtDecoder;
+#   - the context-load test mocks the datastore beans.
+#
+# Disabling Liquibase + supplying a throwaway in-mem R2DBC URL keeps any
+# full-context boot in this profile from touching a real database.
+spring:
+  liquibase:
+    enabled: false
+  r2dbc:
+    url: "r2dbc:h2:mem:///modbff_ctx;DB_CLOSE_DELAY=-1;MODE=PostgreSQL"
+    username: sa
+    password: ""
+
+# Stub federation-api / admin-bff / homeserver base URLs — no test makes a real call
+# (the WebClients are driven by a mocked ExchangeFunction / the clients are mocked),
+# these just keep the beans wireable in a full-context boot.
+federation-api:
+  base-url: "http://localhost:0"
+admin-bff:
+  base-url: "http://localhost:0"
+casdoor:
+  gateway-base: "http://localhost:0"
+  organization: "hugmesh"
+  admin:
+    enabled: false
+external:
+  matrix:
+    base-url: "http://localhost:0"
+    enabled: false
+  mastodon:
+    base-url: "http://localhost:0"
+    enabled: false

@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+            http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.29.xsd">
+
+    <!--
+      Moderator BFF schema. The BFF owns exactly ONE runtime table — the
+      mod_action audit log — because all moderation/manifest state lives in
+      federation-api and the homeserver state lives in tuwunel/akkoma; this BFF is
+      a client of those, never their datastore. Liquibase runs over a JDBC
+      datasource (Liquibase has no R2DBC runner); all runtime data access goes
+      through R2DBC.
+
+        001 — mod_action              (the local moderator-action audit trail)
+        002 — mod_action constraints  (CHECK: platform + action enum membership)
+        003 — mod_action ban surface  (dedup_key + ban_type/expires_at/propagation_state;
+                                       widened action+platform CHECKs for access.suspend/
+                                       access.restore + the 'access' platform)
+        004 — mod_action domain-lock  (widened action+platform CHECKs for domain.lock/
+                                       domain.unlock + the 'domain-lock' platform; ADD-
+                                       semantics force-local, reuses the ban-shape columns)
+        005 — mod_action domain       (multi-tenant DOMAIN scoping: a NOT NULL domain
+                                       column (issuer-derived) + index; scoped audit
+                                       reads filter on it, SUPERADMIN reads unscoped)
+        006 — mod_action dedup domain (cross-tenant dedup-collision fix: drop the GLOBAL
+                                       uq_mod_action_dedup_key + add a COMPOSITE unique
+                                       index on (dedup_key, domain) so two brands sharing
+                                       a subject string never collide on the same key)
+        007 — mod_action wiki         (widened action+platform CHECKs for wiki.grant/
+                                       wiki.timeout/wiki.ban/wiki.restore + the 'wiki'
+                                       platform; makes the wiki-bff access-overlay events
+                                       first-class in the mod audit/queue; reuses the
+                                       existing/ban-shape columns)
+        008 — mod_action notify       (Notifications PR6: the service-scoped @system
+                                       notification directive rides the action row —
+                                       notify_channels (CSV, scoped by platform) +
+                                       notify_email_only; NEVER carries the mod identity)
+        009 — mod_action db-gen id    (DB-generated UUID PK EXEMPLAR: CREATE EXTENSION
+                                       pgcrypto + ADD DEFAULT gen_random_uuid() on the
+                                       already-uuid id column; the app stops minting
+                                       UUID.randomUUID() and reads the generated id back
+                                       via INSERT ... RETURNING id)
+        010 — mod_action owncast      (widened action+platform CHECKs for owncast.hide/
+                                       owncast.kill/owncast.restore + the 'owncast'
+                                       platform; makes the owncast-bff live-stream
+                                       moderation events first-class in the central
+                                       ledger; ALSO adds the federation.finding-resolve
+                                       verb PR #54 introduced without a CHECK widen —
+                                       API<->DB parity fix; reuses the existing columns)
+    -->
+
+    <include file="db/changelog/001-mod-action.xml"/>
+    <include file="db/changelog/002-mod-action-constraints.xml"/>
+    <include file="db/changelog/003-mod-action-ban.xml"/>
+    <include file="db/changelog/004-mod-action-domain-lock.xml"/>
+    <include file="db/changelog/005-mod-action-domain.xml"/>
+    <include file="db/changelog/006-mod-action-dedup-domain.xml"/>
+    <include file="db/changelog/007-mod-action-wiki.xml"/>
+    <include file="db/changelog/008-mod-action-notify.xml"/>
+    <include file="db/changelog/009-mod-action-db-generated-id.xml"/>
+    <include file="db/changelog/010-mod-action-owncast.xml"/>
+</databaseChangeLog>
