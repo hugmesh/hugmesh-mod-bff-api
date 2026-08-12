@@ -34,14 +34,14 @@
          API: domainApplies / isSuperadmin(Authentication) / domainOf(Authentication)
          not present in the commons Roles.) -->
     <dependency>
-      <groupId>systems.hugmesh</groupId>
+      <groupId>net.hugmesh</groupId>
       <artifactId>hugmesh-commons</artifactId>
     </dependency>
 
     <!-- commons test-support base classes (PostgresTestSupport) for full-context
          Testcontainers-backed integration tests. -->
     <dependency>
-      <groupId>systems.hugmesh</groupId>
+      <groupId>net.hugmesh</groupId>
       <artifactId>hugmesh-commons</artifactId>
       <version>2.1.0</version>
       <classifier>tests</classifier>
