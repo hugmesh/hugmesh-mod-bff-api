@@ -9,7 +9,7 @@ name: Release
 # publishes to GHCR.
 #
 # NOTE for whoever enables this: the Dockerfile's build stage resolves the
-# PRIVATE `systems.hugmesh:hugmesh-commons` artifact from the org's GitLab
+# PRIVATE `net.hugmesh:hugmesh-commons` artifact from the org's GitLab
 # Maven Package Registry via `settings.xml`, authenticated with a GitLab
 # CI_JOB_TOKEN (see settings.xml / Dockerfile comments). That token doesn't
 # exist in GitHub Actions, so this build will fail to resolve that dependency

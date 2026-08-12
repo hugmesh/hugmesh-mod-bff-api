@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  CONSUMER Maven settings for resolving the PRIVATE systems.hugmesh:hugmesh-commons
+  CONSUMER Maven settings for resolving the PRIVATE net.hugmesh:hugmesh-commons
   (and hugmesh-parent) artifacts from the org's GitLab project Maven Package Registry.
 
   HOW THE BUILD FINDS hugmesh-commons (two paths, no secrets in git):

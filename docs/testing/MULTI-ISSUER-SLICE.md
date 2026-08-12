@@ -57,7 +57,7 @@ The mod-BFF's `authorizeExchange` policy, end-to-end through the REAL prod chain
 
 ### 1. `TestIssuer` — mint issuer-specific JWTs against test JWKs (no network)
 
-`src/test/java/systems/hugmesh/modbff/testsupport/TestIssuer.java`. Copied **verbatim**
+`src/test/java/net/hugmesh/modbff/testsupport/TestIssuer.java`. Copied **verbatim**
 from the gateway (package change only). Each instance generates a fresh RSA keypair,
 starts a JDK `HttpServer` on `127.0.0.1:<random-port>` serving
 `/.well-known/openid-configuration` + `/.well-known/jwks.json`, and exposes
@@ -68,7 +68,7 @@ is `nimbus-jose-jwt`, already transitive via `spring-boot-starter-oauth2-resourc
 
 ### 2. `SecuritySliceSupport` — build the REAL filter chain into a `WebTestClient`
 
-`src/test/java/systems/hugmesh/modbff/config/SecuritySliceSupport.java`. Constructs
+`src/test/java/net/hugmesh/modbff/config/SecuritySliceSupport.java`. Constructs
 this repo's real `SecurityConfig(...).filterChain(...)` (the prod chain — the
 constructor also takes the D8 MFA `enabled`/`freshness-window` pair, both pinned to
 `false`/`600000L` by the slice), wraps it in a `WebFilterChainProxy`, and installs it
