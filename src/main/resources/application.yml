@@ -169,7 +169,7 @@ springdoc:
     path: /swagger-ui.html
   # Restrict the component scan to this BFF's own controllers so the spec stays the
   # mod-BFF surface only (no stray springframework/actuator paths leak in).
-  packages-to-scan: systems.hugmesh.modbff
+  packages-to-scan: net.hugmesh.modbff
   # Drop the REDUNDANT trailing-slash alias of the domain-lock/unlock routes from the
   # SPEC ONLY. Those endpoints map TWO paths to one method
   # ({@code "/domain-lock/{role}/{user}"} + the trailing-slash variant) so WebFlux

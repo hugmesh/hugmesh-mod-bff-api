@@ -489,7 +489,7 @@ sequenceDiagram
 > (`application.yml`), and the `domain` column + composite dedup index (changelogs
 > `005`/`006`) are all on `main`. The converter / `DomainRegistry` /
 > multi-issuer resource server are now the **shared `hugmesh-commons` 2.1.0**
-> implementations (`systems.hugmesh.commons.security.*` /
+> implementations (`net.hugmesh.commons.security.*` /
 > `commons.config.*`), wired in via the local `CommonsSecurityConfig` `@Import` step
 > — they are no longer per-repo copies. A single-issuer cluster still works
 > unchanged (every token resolves to `DOMAIN_default`).
@@ -628,7 +628,7 @@ initContainer) and the generator-owned deployment requirement.
   `hugmesh-commons` 2.1.0 for the shared security/tenancy code. The per-repo
   copies of the Casdoor converter, `DomainRegistry`, and the multi-issuer resource
   server have been **deleted** and replaced by the shared commons types
-  (`systems.hugmesh.commons.security.*` / `commons.config.*`), wired via the
+  (`net.hugmesh.commons.security.*` / `commons.config.*`), wired via the
   local `CommonsSecurityConfig` `@Import`. Local code that remains: `SecurityConfig`
   (single-issuer chain + profile-split spec gate + SUPERADMIN floor), `Roles`
   (fail-closed tenant helpers), and the mod-specific service/clients/audit.
@@ -738,7 +738,7 @@ stage — NOT a deployed CronJob or a UI-triggered scan.
 ## Layout
 
 ```
-src/main/java/systems/hugmesh/modbff
+src/main/java/net/hugmesh/modbff
   ModBffApplication.java            entry point
   ModController.java                /bff/mod/** reactive endpoints
   service/ModService.java           ban/lift/domain-lock orchestration + defence-in-depth guards (self-ban, privileged-target, same-tenant)
@@ -761,7 +761,7 @@ src/main/java/systems/hugmesh/modbff
 
 The Casdoor JWT→authority converter (CasdoorAuthorities), the issuer→domain
 DomainRegistry, and the opt-in multi-issuer TenancyResourceServerConfig now live in
-the shared hugmesh-commons 2.1.0 artifact (systems.hugmesh.commons.security.* /
+the shared hugmesh-commons 2.1.0 artifact (net.hugmesh.commons.security.* /
 commons.config.*) and are wired in via CommonsSecurityConfig — they are no longer
 per-repo files.
 
