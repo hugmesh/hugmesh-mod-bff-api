@@ -37,7 +37,7 @@ class SecurityConfigConverterTest {
     }
 
     private List<String> authorities(Jwt jwt) {
-        DomainRegistry reg = new DomainRegistry("https://id.hugmesh.systems", "");
+        DomainRegistry reg = new DomainRegistry("https://id.hugmesh.net", "");
         return config(reg).casdoorAuthoritiesConverter()
                 .convert(jwt)
                 .map(GrantedAuthority::getAuthority)
@@ -48,7 +48,7 @@ class SecurityConfigConverterTest {
     private static Jwt.Builder base() {
         return Jwt.withTokenValue("t").header("alg", "none")
                 .issuedAt(Instant.now()).expiresAt(Instant.now().plusSeconds(3600))
-                .issuer("https://id.hugmesh.systems")
+                .issuer("https://id.hugmesh.net")
                 .subject("u");
     }
 
@@ -84,7 +84,7 @@ class SecurityConfigConverterTest {
 
     @Test
     void converterReturnsFlux() {
-        Flux<GrantedAuthority> flux = config(new DomainRegistry("https://id.hugmesh.systems", ""))
+        Flux<GrantedAuthority> flux = config(new DomainRegistry("https://id.hugmesh.net", ""))
                 .casdoorAuthoritiesConverter().convert(base().build());
         assertThat(flux.collectList().block()).isNotEmpty();
     }

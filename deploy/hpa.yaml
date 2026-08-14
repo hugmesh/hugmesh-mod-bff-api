@@ -13,7 +13,7 @@ kind: HorizontalPodAutoscaler
 metadata:
   name: hugmesh-mod-bff-api
   namespace: hugmesh-backend
-  labels: { app: hugmesh-mod-bff-api, app.kubernetes.io/part-of: hugmesh.systems }
+  labels: { app: hugmesh-mod-bff-api, app.kubernetes.io/part-of: hugmesh.net }
 spec:
   scaleTargetRef:
     apiVersion: apps/v1

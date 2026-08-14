@@ -86,8 +86,8 @@ class RolesTest {
 
         @Test
         void domainOf_jwt_viaRegistry_singleIssuerIsDefault() {
-            DomainRegistry reg = new DomainRegistry("https://id.hugmesh.systems", "");
-            Jwt jwt = jwtWithIssuer("https://id.hugmesh.systems", Map.of("roles", List.of("mod")));
+            DomainRegistry reg = new DomainRegistry("https://id.hugmesh.net", "");
+            Jwt jwt = jwtWithIssuer("https://id.hugmesh.net", Map.of("roles", List.of("mod")));
             assertThat(Roles.domainOf(jwt, reg)).isEqualTo(DomainRegistry.DEFAULT_DOMAIN);
             // defensive null inputs
             assertThat(Roles.domainOf((Jwt) null, reg)).isEqualTo(DomainRegistry.DEFAULT_DOMAIN);

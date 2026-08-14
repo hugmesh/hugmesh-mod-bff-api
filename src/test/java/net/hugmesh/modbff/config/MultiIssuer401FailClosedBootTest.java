@@ -118,7 +118,7 @@ class MultiIssuer401FailClosedBootTest extends PostgresTestSupport {
         // Explicit jwk-set-uri for that SAME back-compat issuer, pinned to BRAND_X's
         // in-process JWKS endpoint. application.yml's jwk-set-uri default (added for the
         // in-DNS Casdoor fix) otherwise resolves to the real
-        // https://id.hugmesh.systems/.well-known/jwks — unreachable here — and
+        // https://id.hugmesh.net/.well-known/jwks — unreachable here — and
         // TenancyResourceServerConfig.backCompatJwkSetUri only skips OIDC discovery FOR
         // that issuer when jwk-set-uri is set, so a stale/default value there fails EVERY
         // request in this class at key-lookup time (500, not the expected 401/403/200).

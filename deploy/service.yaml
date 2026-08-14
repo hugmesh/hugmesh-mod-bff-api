@@ -1,5 +1,5 @@
 # ClusterIP only — reachable solely through the fe-gateway's /bff/mod/** route, so
-# /bff is same-origin with hugmesh.systems and is role-checked at the gateway.
+# /bff is same-origin with hugmesh.net and is role-checked at the gateway.
 apiVersion: v1
 kind: Service
 metadata:

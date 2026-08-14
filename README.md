@@ -583,7 +583,7 @@ initContainer) and the generator-owned deployment requirement.
   - **tuwunel (Matrix) — STUBBED.** A Conduit-family server with, per the generator
     manifest + upstream source, **no Synapse-style `/_synapse/admin` REST API and no
     HTTP admin surface at all** — server-admin verbs are `!admin ...` text commands
-    posted as `m.room.message` events into the admin room (`#admins:hugmesh.systems`)
+    posted as `m.room.message` events into the admin room (`#admins:hugmesh.net`)
     and answered asynchronously by an in-process bot. A real wire-up needs a small
     persistent Matrix client (token lifecycle, alias→room_id resolution, txn ids,
     async-reply correlation), deliberately NOT half-built here. So

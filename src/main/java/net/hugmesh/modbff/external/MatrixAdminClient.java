@@ -17,7 +17,7 @@ import reactor.core.publisher.Mono;
  * source, has <b>NO Synapse-style {@code /_synapse/admin} REST API and no HTTP admin
  * surface at all</b>. Server-admin verbs are {@code !admin ...} text commands posted
  * as {@code m.room.message} events into the auto-created admin room
- * ({@code #admins:hugmesh.systems}); an in-process bot reads them and replies
+ * ({@code #admins:hugmesh.net}); an in-process bot reads them and replies
  * <i>asynchronously</i> with another room event. The verified verbs are:
  * <ul>
  *   <li><b>deactivate</b>: {@code !admin users deactivate @<localpart>:<server>}

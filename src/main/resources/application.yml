@@ -5,14 +5,14 @@ spring:
     oauth2:
       resourceserver:
         jwt:
-          # The Casdoor issuer (id.hugmesh.systems) the be-gateway mints JWTs
+          # The Casdoor issuer (id.hugmesh.net) the be-gateway mints JWTs
           # against; the resource-server validates the forwarded bearer here too.
-          issuer-uri: "${CASDOOR_ISSUER_URI:https://id.hugmesh.systems}"
+          issuer-uri: "${CASDOOR_ISSUER_URI:https://id.hugmesh.net}"
           # Explicit JWKS so the resource server does NOT do OIDC discovery against issuer-uri
           # (unreachable in-container when issuer-uri is the browser-facing localhost:8000, which
           # 500s every authenticated call). Mirrors hugmesh-actions + the gateway; compose sets
           # CASDOOR_JWKS_URI=http://casdoor:8000/.well-known/jwks. iss is still validated via issuer-uri.
-          jwk-set-uri: "${CASDOOR_JWKS_URI:${CASDOOR_ISSUER_URI:https://id.hugmesh.systems}/.well-known/jwks}"
+          jwk-set-uri: "${CASDOOR_JWKS_URI:${CASDOOR_ISSUER_URI:https://id.hugmesh.net}/.well-known/jwks}"
 
   # Runtime data access is REACTIVE (R2DBC) over the config datastore — this BFF
   # owns exactly ONE runtime table, the mod_action audit log. Everything else lives

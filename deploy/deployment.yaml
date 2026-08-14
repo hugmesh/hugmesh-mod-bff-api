@@ -18,14 +18,14 @@ kind: Deployment
 metadata:
   name: hugmesh-mod-bff-api
   namespace: hugmesh-backend
-  labels: { app: hugmesh-mod-bff-api, app.kubernetes.io/part-of: hugmesh.systems }
+  labels: { app: hugmesh-mod-bff-api, app.kubernetes.io/part-of: hugmesh.net }
 spec:
   replicas: 1
   selector: { matchLabels: { app: hugmesh-mod-bff-api } }
   template:
     metadata: { labels: { app: hugmesh-mod-bff-api } }
     spec:
-      nodeSelector: { hugmesh.systems/backend: "true" }
+      nodeSelector: { hugmesh.net/backend: "true" }
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
@@ -92,7 +92,7 @@ spec:
             # JWKS auto-discovered from the issuer well-known; no jwk-set-uri /
             # client secret needed (pure resource server, like federation-api).
             - name: CASDOOR_ISSUER_URI
-              value: "https://id.hugmesh.systems"
+              value: "https://id.hugmesh.net"
             # WebClient to the federation-api module-federation registry (the
             # mod BFF drives moderation_requests there, forwarding the caller JWT).
             - name: FEDERATION_API_URL
