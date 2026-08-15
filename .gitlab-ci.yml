@@ -47,6 +47,16 @@ test:
     # resolved via the committed settings.xml authenticated by the GitLab
     # CI_JOB_TOKEN; -s settings.xml points Maven at the gitlab-maven group repo.
     - ./mvnw verify -B -s settings.xml
+    # ANY TEST THAT REGENERATES A COMMITTED ARTEFACT PASSES BY REWRITING IT, and in a
+    # throwaway CI workspace nobody ever sees the diff. OpenApiSpecDumpTest used to do exactly
+    # that with src/main/resources/openapi/openapi.json: it wrote by default and asserted only
+    # under an opt-in flag that nothing ever set, so the contract the ng-openapi-gen typed
+    # clients and the docs pipeline consume drifted while the build stayed green. That test now
+    # asserts by default; this line catches the NEXT such artefact without knowing what it is.
+    # A clean tree after the build is the invariant; a dirty one means the build silently
+    # disagreed with something that is checked in.
+    - git diff --exit-code
+      || { echo "BUILD REWROTE A COMMITTED FILE (see the diff above) — a test regenerated a checked-in artefact instead of asserting it. Regenerate locally and commit, or make that test assert."; exit 1; }
   artifacts:
     when: always
     reports:
