@@ -226,6 +226,34 @@ app:
   tenancy:
     issuers: "${APP_TENANCY_ISSUERS:}"
 
+  # D8 Casdoor MFA. TWO INDEPENDENT halves, both DARK by default:
+  #
+  #   enabled                  — DERIVATION only. When true, CasdoorAuthorities derives the
+  #                              MFA_SATISFIED marker from a JWT's freshness-validated
+  #                              mfa_satisfied_at claim (see SecurityConfig). When false the
+  #                              converter emits the byte-identical legacy authority set and
+  #                              a JWT caller NEVER carries the marker. Note the opaque bff_
+  #                              session carrier is unaffected either way — the introspect
+  #                              response's mfaSatisfied field drives it (see
+  #                              BffCookieAuthenticationWebFilter).
+  #   freshness-window         — the 0 <= now - mfa_satisfied_at <= window freshness window in
+  #                              millis (default 10m). A future or stale stamp is rejected.
+  #   enforce-sensitive-writes — ENFORCEMENT only. When true the five sensitive write-effects
+  #                              (POST /bff/mod/block, POST|DELETE /bff/mod/ban,
+  #                              POST|DELETE /bff/mod/domain-lock/{role}/{user}) additionally
+  #                              REQUIRE the MFA_SATISFIED marker and 403 without it
+  #                              (ModStepUpGate, fail-closed). Kept SEPARATE from `enabled`
+  #                              — mirroring the gateway's app.mfa.enforce-privileged-floor —
+  #                              so turning derivation on can never silently start denying
+  #                              moderators.
+  #
+  # ⚠ On a JWT-carrier deployment the two MUST be flipped TOGETHER: enforce-sensitive-writes
+  # without enabled means the marker is never derived, so every gated call 403s.
+  mfa:
+    enabled: "${APP_MFA_ENABLED:false}"
+    freshness-window: "${APP_MFA_FRESHNESS_WINDOW_MS:600000}"
+    enforce-sensitive-writes: "${APP_MFA_ENFORCE_SENSITIVE_WRITES:false}"
+
   # BffCookieAuthenticationWebFilter — bridges an opaque bff_ session token into THIS
   # service's OWN Spring Security context, over admin-bff's
   # GET /bff/internal/session/introspect (mirrors the gateway's own BffSessionAuthFilter

@@ -49,6 +49,18 @@ import java.util.Map;
  * path, AND {@code @PreAuthorize("hasAnyRole('MOD','ADMIN')")} re-checks at each
  * method.
  *
+ * <p><b>Step-up MFA on the SENSITIVE write-effects.</b> The five platform-wide /
+ * user-visible effects — {@code POST /block}, {@code POST|DELETE /ban} and
+ * {@code POST|DELETE /domain-lock/{role}/{user}} — carry an EXTRA conjunct,
+ * {@code @modStepUpGate.satisfied(authentication)}, on top of the role check: with
+ * {@code app.mfa.enforce-sensitive-writes} armed, the caller must also carry the
+ * {@code MFA_SATISFIED} marker or the call is 403 BEFORE {@link ModService} runs (so
+ * no external effect and no audit row). The flag ships DARK, so by default the gate is
+ * inert and these endpoints behave exactly as before — see
+ * {@link net.hugmesh.modbff.security.ModStepUpGate} for the two-flag contract. The
+ * remaining endpoints (reads, the moderation-queue write, the owncast stream actions)
+ * keep the plain role gate.
+ *
  * <p>The MOD surface is deliberately NARROW — no infra/server-admin endpoints:
  * <ul>
  *   <li><b>Moderation triage</b> — list/get the federation moderation queue
@@ -182,10 +194,10 @@ public class ModController {
             @ApiResponse(responseCode = "202", description = "Pending-reconcile — homeserver call STUBBED/degraded; action audited"),
             @ApiResponse(responseCode = "400", description = "Validation failed — invalid platform/scope/target", content = @Content),
             @ApiResponse(responseCode = "401", description = "Unauthenticated", content = @Content),
-            @ApiResponse(responseCode = "403", description = "Caller lacks ROLE_MOD or ROLE_ADMIN, or target is privileged / cross-tenant", content = @Content),
+            @ApiResponse(responseCode = "403", description = "Caller lacks ROLE_MOD or ROLE_ADMIN, step-up MFA is required but not satisfied, or target is privileged / cross-tenant", content = @Content),
             @ApiResponse(responseCode = "500", description = "Unexpected server error", content = @Content)
     })
-    @PreAuthorize("hasAnyRole('MOD','ADMIN')")
+    @PreAuthorize("hasAnyRole('MOD','ADMIN') and @modStepUpGate.satisfied(authentication)")
     @PostMapping("/block")
     public Mono<ResponseEntity<Map<String, Object>>> block(@Valid @RequestBody BlockRequest b,
                                                            Authentication auth) {
@@ -224,10 +236,10 @@ public class ModController {
             @ApiResponse(responseCode = "202", description = "Pending-reconcile — desired-state written; reconcile loop applies the effect"),
             @ApiResponse(responseCode = "400", description = "Validation failed — missing/invalid field", content = @Content),
             @ApiResponse(responseCode = "401", description = "Unauthenticated", content = @Content),
-            @ApiResponse(responseCode = "403", description = "Self-ban, privileged target, or cross-tenant attempt denied", content = @Content),
+            @ApiResponse(responseCode = "403", description = "Step-up MFA not satisfied, self-ban, privileged target, or cross-tenant attempt denied", content = @Content),
             @ApiResponse(responseCode = "500", description = "Unexpected server error", content = @Content)
     })
-    @PreAuthorize("hasAnyRole('MOD','ADMIN')")
+    @PreAuthorize("hasAnyRole('MOD','ADMIN') and @modStepUpGate.satisfied(authentication)")
     @PostMapping("/ban")
     public Mono<ResponseEntity<Map<String, Object>>> ban(@Valid @RequestBody BanRequest b, Authentication auth) {
         return mod.ban(b.platformLower(), str(b.target()), b.ttlSeconds(), str(b.reason()),
@@ -246,10 +258,10 @@ public class ModController {
             @ApiResponse(responseCode = "202", description = "Pending-reconcile — desired-state cleared; reconcile loop lifts the effect"),
             @ApiResponse(responseCode = "400", description = "Validation failed — missing/invalid field", content = @Content),
             @ApiResponse(responseCode = "401", description = "Unauthenticated", content = @Content),
-            @ApiResponse(responseCode = "403", description = "Self-lift or cross-tenant attempt denied", content = @Content),
+            @ApiResponse(responseCode = "403", description = "Step-up MFA not satisfied, self-lift, or cross-tenant attempt denied", content = @Content),
             @ApiResponse(responseCode = "500", description = "Unexpected server error", content = @Content)
     })
-    @PreAuthorize("hasAnyRole('MOD','ADMIN')")
+    @PreAuthorize("hasAnyRole('MOD','ADMIN') and @modStepUpGate.satisfied(authentication)")
     @DeleteMapping("/ban")
     public Mono<ResponseEntity<Map<String, Object>>> lift(@Valid @RequestBody BanRequest b, Authentication auth) {
         return mod.lift(b.platformLower(), str(b.target()), b.idempotencyKey(), auth)
@@ -280,10 +292,10 @@ public class ModController {
             @ApiResponse(responseCode = "202", description = "Pending-reconcile — domain-lock desired-state written"),
             @ApiResponse(responseCode = "400", description = "Invalid role path variable", content = @Content),
             @ApiResponse(responseCode = "401", description = "Unauthenticated", content = @Content),
-            @ApiResponse(responseCode = "403", description = "Self-lock, privileged target, or cross-tenant attempt denied", content = @Content),
+            @ApiResponse(responseCode = "403", description = "Step-up MFA not satisfied, self-lock, privileged target, or cross-tenant attempt denied", content = @Content),
             @ApiResponse(responseCode = "500", description = "Unexpected server error", content = @Content)
     })
-    @PreAuthorize("hasAnyRole('MOD','ADMIN')")
+    @PreAuthorize("hasAnyRole('MOD','ADMIN') and @modStepUpGate.satisfied(authentication)")
     @PostMapping({"/domain-lock/{role}/{user}", "/domain-lock/{role}/{user}/"})
     public Mono<ResponseEntity<Map<String, Object>>> domainLock(
             @PathVariable
@@ -311,10 +323,10 @@ public class ModController {
             @ApiResponse(responseCode = "202", description = "Pending-reconcile — domain-lock desired-state cleared"),
             @ApiResponse(responseCode = "400", description = "Invalid role path variable", content = @Content),
             @ApiResponse(responseCode = "401", description = "Unauthenticated", content = @Content),
-            @ApiResponse(responseCode = "403", description = "Self-unlock or cross-tenant attempt denied", content = @Content),
+            @ApiResponse(responseCode = "403", description = "Step-up MFA not satisfied, self-unlock, or cross-tenant attempt denied", content = @Content),
             @ApiResponse(responseCode = "500", description = "Unexpected server error", content = @Content)
     })
-    @PreAuthorize("hasAnyRole('MOD','ADMIN')")
+    @PreAuthorize("hasAnyRole('MOD','ADMIN') and @modStepUpGate.satisfied(authentication)")
     @DeleteMapping({"/domain-lock/{role}/{user}", "/domain-lock/{role}/{user}/"})
     public Mono<ResponseEntity<Map<String, Object>>> domainUnlock(
             @PathVariable

@@ -103,6 +103,22 @@ public final class Roles {
         return ts > 0 ? ts : null;                    // non-positive -> fail-closed
     }
 
+    /** {@link #MFA_SATISFIED} read off an {@link Authentication}'s authorities — the
+     *  already-CONVERTED form, which is the ONLY form both of this BFF's auth carriers
+     *  share (the JWT converter derives it from {@link #MFA_SATISFIED_AT_CLAIM}; the
+     *  opaque {@code bff_} session filter adds it from admin-bff's introspect
+     *  {@code mfaSatisfied} field — there is no {@link Jwt} on that path). Freshness was
+     *  applied by whichever producer stamped it, so this is a pure presence check.
+     *  Fail-closed: a {@code null} authentication is NOT satisfied. Mirrors
+     *  {@link #isSuperadmin(Authentication)}. */
+    public static boolean isMfaSatisfied(Authentication auth) {
+        if (auth == null) return false;
+        for (GrantedAuthority a : auth.getAuthorities()) {
+            if (MFA_SATISFIED.equals(a.getAuthority())) return true;
+        }
+        return false;
+    }
+
     /** Returns every role name carried by the JWT, upper-cased + trimmed. Empty list
      *  if the claim is missing. */
     public static List<String> fromJwt(Jwt jwt) {

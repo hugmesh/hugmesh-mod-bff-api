@@ -406,6 +406,54 @@ calling OUT to admin-bff-api — see below, not stored locally). The
 `/actuator/health` + `/actuator/info` probes are public so k8s/Docker healthchecks
 need no token.
 
+### Step-up MFA on sensitive write-effects (✅ shipped, ships dark)
+
+> **Status: ✅ enforcement shipped, inert by default.** The upstream Casdoor MFA
+> CHALLENGE (WebAuthn/TOTP/recovery, per-role defaults) is **not** this repo's — mod-bff
+> can only ever CONSUME the proof, never mint it.
+
+The five mod endpoints with a platform-wide / user-visible, hard-to-reverse effect
+carry an extra conjunct on their `@PreAuthorize`, on top of the `MOD`/`ADMIN` role:
+
+| Endpoint | Effect | Step-up |
+| --- | --- | --- |
+| `POST /bff/mod/block` | server-wide Matrix/Mastodon block | ✅ required |
+| `POST /bff/mod/ban` | access-role ban (desired-state write) | ✅ required |
+| `DELETE /bff/mod/ban` | lift a ban | ✅ required |
+| `POST /bff/mod/domain-lock/{role}/{user}` | force local-only | ✅ required |
+| `DELETE /bff/mod/domain-lock/{role}/{user}` | domain-unlock | ✅ required |
+
+Everything else on the mod surface — the queue reads, `POST /moderation`,
+`/moderation/{id}/refer`, the findings surface, `/modules`, `/audit` — keeps the plain
+role gate. The **owncast** `hide`/`kill`/`restore` actions are deliberately **not** in
+the first enforced set: they are in-brand stream-visibility effects with a restore
+path, and widening the enforced surface to them is a separate call, not a silent
+side effect of this change.
+
+The proof consumed is the `MFA_SATISFIED` marker authority — never a raw claim — so
+**both** auth carriers land on one rule: a Casdoor JWT gets it from
+`CasdoorAuthorities`' freshness-validated `mfa_satisfied_at` derivation, and an opaque
+`bff_` session gets it from admin-bff's introspect `mfaSatisfied` field (see
+*Native-login (`bff_` session) support*). The converter's reserved-prefix guard drops a
+forged `permissions:["MFA_SATISFIED"]`, so the marker cannot be self-asserted. A denied
+call is a clean 403 raised **before** `ModService` runs — no external effect, no audit
+row.
+
+Two independent flags, both `false` by default (`ModStepUpGate` / `SecurityConfig`):
+
+| Property | Env | Governs |
+| --- | --- | --- |
+| `app.mfa.enabled` | `APP_MFA_ENABLED` | **derivation** — whether a JWT's `mfa_satisfied_at` becomes `MFA_SATISFIED` |
+| `app.mfa.freshness-window` | `APP_MFA_FRESHNESS_WINDOW_MS` | the `0 <= now - stamp <= window` window (default 10m) |
+| `app.mfa.enforce-sensitive-writes` | `APP_MFA_ENFORCE_SENSITIVE_WRITES` | **enforcement** — whether the five endpoints above require the marker |
+
+Keeping enforcement on its own sub-flag mirrors the gateway's
+`app.mfa.enforce-privileged-floor` split, so turning derivation on can never silently
+start denying moderators. ⚠ On a JWT-carrier deployment the two must be flipped
+**together**: `enforce-sensitive-writes` without `enabled` means the marker is never
+derived and every gated call 403s. Once armed the gate is fail-closed — a missing or
+unprovable second factor is a denial, never a pass.
+
 ## Native-login (`bff_` session) support
 
 > **Status: ✅ shipped.**
@@ -660,7 +708,9 @@ initContainer) and the generator-owned deployment requirement.
 - **✅ Hardening:** API↔DB CHECK-constraint parity + jakarta validation, config-gated
   inbound + outbound mTLS (default off), three-layer authz (gateway route-access /
   filter path rule / `@PreAuthorize`), defence-in-depth ban guards (self / privileged
-  target / same-tenant, all fail-closed).
+  target / same-tenant, all fail-closed), and step-up MFA on the five sensitive
+  write-effects (`app.mfa.enforce-sensitive-writes`, ships dark — see *Step-up MFA on
+  sensitive write-effects*).
 - **✅ CI: GitLab-primary.** `.gitlab-ci.yml` `test` / `security` / `build` / `pentest`
   stages; the pen-test SCA + DAST jobs `extend` the centralized hidden jobs included
   from `hugmesh-generator`. This GitHub repository is a pull-mirror of that internal
@@ -687,11 +737,14 @@ work as done:
   follow-up, kept deferred (not shipped). The akkoma/Mastodon leg is **already wired**
   (✅, dark by default) and only awaits live verification against a real akkoma
   instance — it is no longer a deferred follow-up.
-- 🔭 **Casdoor MFA step-up.** Platform design (WebAuthn + TOTP + recovery, per-role
-  defaults, `amr`/`acr` → `MFA_SATISFIED` fail-closed) may later gate this BFF's
-  sensitive write-effects (ban / domain-lock). The shared `CasdoorAuthorities` in
-  commons already carries an `MfaConfig` seam, but no mod-bff enforcement exists yet;
-  if step-up gating is added to the mod surface it will be documented here.
+- 🔭 **Casdoor MFA step-up — the CHALLENGE half.** The mod-bff **enforcement** half is
+  ✅ shipped and documented above (*Step-up MFA on sensitive write-effects*): ban / lift
+  / domain-lock / unlock / block require the `MFA_SATISFIED` marker when
+  `app.mfa.enforce-sensitive-writes` is armed. What is still 🔭 is upstream and NOT in
+  this repo: the platform Casdoor MFA challenge (WebAuthn + TOTP + recovery, per-role
+  defaults) that actually stamps `mfa_satisfied_at` / sets the introspect
+  `mfaSatisfied` flag. Until that ships, arming the flag would deny every moderator,
+  which is exactly why it ships dark.
 - 🔭 **Cross-realm / SSO security e2e.** This BFF is a conforming resource server on
   both auth models it now supports (Casdoor-JWT bearer, and the native-login `bff_`
   session bridge — see *Native-login (`bff_` session) support*) and needs no
@@ -742,7 +795,8 @@ src/main/java/net/hugmesh/modbff
   ModBffApplication.java            entry point
   ModController.java                /bff/mod/** reactive endpoints
   service/ModService.java           ban/lift/domain-lock orchestration + defence-in-depth guards (self-ban, privileged-target, same-tenant)
-  security/Roles.java               authority helpers — domainOf / domainApplies (fail-closed tenant scope)
+  security/Roles.java               authority helpers — domainOf / domainApplies (fail-closed tenant scope) + isMfaSatisfied
+  security/ModStepUpGate.java       step-up MFA predicate for the sensitive write-effects (@PreAuthorize conjunct, ships dark behind app.mfa.enforce-sensitive-writes)
   config/SecurityConfig.java        Casdoor JWT resource server + profile-split spec gating + SUPERADMIN floor (delegates to commons CasdoorAuthorities)
   config/CommonsSecurityConfig.java @Import of the shared hugmesh-commons security/tenancy wiring (CasdoorAuthorities / DomainRegistry / TenancyResourceServerConfig)
   config/OpenApiConfig.java         springdoc OpenAPI metadata
