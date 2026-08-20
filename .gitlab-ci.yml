@@ -9,7 +9,7 @@
 # onboarded repo shares ONE source of truth (SCA + the full DAST harness:
 # authenticated ZAP + custom probes + nuclei). See memory: hugmesh-pentest-standard.
 include:
-  - project: 'HugMesh/hugmesh-generator'
+  - project: 'hugmesh/hugmesh-generator'
     ref: main
     file: '/tests/pentest/ci/pentest-stage.gitlab-ci.yml'
 
