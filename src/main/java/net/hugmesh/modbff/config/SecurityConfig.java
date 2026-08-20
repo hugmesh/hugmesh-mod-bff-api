@@ -29,6 +29,7 @@ import net.hugmesh.commons.config.TenancyResourceServerConfig;
 import net.hugmesh.commons.security.CasdoorAuthorities;
 import net.hugmesh.commons.security.DomainRegistry;
 import net.hugmesh.modbff.auth.BffCookieAuthenticationWebFilter;
+import net.hugmesh.modbff.security.ModStepUpGate;
 
 /**
  * Casdoor-aware OAuth2 resource-server security for the moderator BFF (reactive
@@ -284,6 +285,25 @@ public class SecurityConfig {
         // Keep the default ROLE_ prefix explicit so hasRole('ADMIN') maps to ROLE_ADMIN.
         handler.setDefaultRolePrefix(new GrantedAuthorityDefaults("ROLE_").getRolePrefix());
         return handler;
+    }
+
+    /**
+     * The step-up gate the sensitive-write {@code @PreAuthorize} expressions call
+     * ({@code @modStepUpGate.satisfied(authentication)} — see {@link net.hugmesh.modbff.ModController}).
+     * Declared HERE, not as a {@code @Component}, so every slice that already imports this
+     * config to activate method security gets the bean the expressions resolve against —
+     * a stray {@code @Component} would leave those slices evaluating an unresolvable bean
+     * reference.
+     *
+     * <p>{@code app.mfa.enforce-sensitive-writes} is a SEPARATE sub-flag from
+     * {@code app.mfa.enabled} above (which governs only whether the converter DERIVES
+     * {@code MFA_SATISFIED}), mirroring the gateway's {@code app.mfa.enforce-privileged-floor}
+     * split. Default {@code false} ⇒ the gate is inert and the endpoints are unchanged.
+     */
+    @Bean
+    ModStepUpGate modStepUpGate(
+            @Value("${app.mfa.enforce-sensitive-writes:false}") boolean enforceSensitiveWrites) {
+        return new ModStepUpGate(enforceSensitiveWrites);
     }
 
     private ReactiveJwtAuthenticationConverter jwtConverter() {

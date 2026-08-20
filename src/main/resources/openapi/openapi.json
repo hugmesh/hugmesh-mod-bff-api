@@ -72,7 +72,7 @@
             "description" : "Unauthenticated"
           },
           "403" : {
-            "description" : "Self-lock, privileged target, or cross-tenant attempt denied"
+            "description" : "Step-up MFA not satisfied, self-lock, privileged target, or cross-tenant attempt denied"
           },
           "500" : {
             "description" : "Unexpected server error"
@@ -131,7 +131,7 @@
             "description" : "Unauthenticated"
           },
           "403" : {
-            "description" : "Self-unlock or cross-tenant attempt denied"
+            "description" : "Step-up MFA not satisfied, self-unlock, or cross-tenant attempt denied"
           },
           "500" : {
             "description" : "Unexpected server error"
@@ -507,7 +507,7 @@
             "description" : "Unauthenticated"
           },
           "403" : {
-            "description" : "Caller lacks ROLE_MOD or ROLE_ADMIN, or target is privileged / cross-tenant"
+            "description" : "Caller lacks ROLE_MOD or ROLE_ADMIN, step-up MFA is required but not satisfied, or target is privileged / cross-tenant"
           },
           "500" : {
             "description" : "Unexpected server error"
@@ -551,7 +551,7 @@
             "description" : "Unauthenticated"
           },
           "403" : {
-            "description" : "Self-ban, privileged target, or cross-tenant attempt denied"
+            "description" : "Step-up MFA not satisfied, self-ban, privileged target, or cross-tenant attempt denied"
           },
           "500" : {
             "description" : "Unexpected server error"
@@ -593,7 +593,7 @@
             "description" : "Unauthenticated"
           },
           "403" : {
-            "description" : "Self-lift or cross-tenant attempt denied"
+            "description" : "Step-up MFA not satisfied, self-lift, or cross-tenant attempt denied"
           },
           "500" : {
             "description" : "Unexpected server error"
