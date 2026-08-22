@@ -96,24 +96,24 @@ microblogging via Akkoma, live streaming, a wiki, and more) built around Casdoor
 identity. This BFF is the moderation service in that platform. Repositories it talks to
 directly, or that it's the sibling of:
 
-- [`hugmesh-federation-api`](https://github.com/hugmesh-net/hugmesh-federation-api) —
+- [`hugmesh-federation-api`](https://github.com/hugmesh/hugmesh-federation-api) —
   the moderation queue, federation manifest, and automated system-finding queue this
   BFF reads from and writes recommendations/referrals to.
-- [`hugmesh-admin-bff-api`](https://github.com/hugmesh-net/hugmesh-admin-bff-api) —
+- [`hugmesh-admin-bff-api`](https://github.com/hugmesh/hugmesh-admin-bff-api) —
   the admin-scoped BFF this service is the role analog of; owns the access-role and
   domain-lock desired-state plus the reconcile loop that applies them.
-- [`hugmesh-owncast-bff-api`](https://github.com/hugmesh-net/hugmesh-owncast-bff-api) —
+- [`hugmesh-owncast-bff-api`](https://github.com/hugmesh/hugmesh-owncast-bff-api) —
   the live-streaming moderation surface (hide/kill/restore) this BFF drives.
-- [`hugmesh-wiki-bff-api`](https://github.com/hugmesh-net/hugmesh-wiki-bff-api) — owns
+- [`hugmesh-wiki-bff-api`](https://github.com/hugmesh/hugmesh-wiki-bff-api) — owns
   the wiki access overlay whose grant/timeout/ban/restore events show up in this BFF's
   moderation audit trail.
-- [`hugmesh-fe-gateway`](https://github.com/hugmesh-net/hugmesh-fe-gateway) — the
+- [`hugmesh-fe-gateway`](https://github.com/hugmesh/hugmesh-fe-gateway) — the
   platform's edge gateway; fronts this BFF, applies route-access rules, and bridges the
   native-login session.
-- [`hugmesh-commons`](https://github.com/hugmesh-net/hugmesh-commons) — the shared
+- [`hugmesh-commons`](https://github.com/hugmesh/hugmesh-commons) — the shared
   security/tenancy library (Casdoor JWT converter, domain registry) this service
   consumes rather than reimplementing.
-- [`hugmesh-generator`](https://github.com/hugmesh-net/hugmesh-generator) — cluster
+- [`hugmesh-generator`](https://github.com/hugmesh/hugmesh-generator) — cluster
   manifests, deployment tooling, and the shared pen-test CI stage this repo's pipeline
   extends.
 - `hugmesh-mod-ui` — the moderator-facing Angular front end for this BFF. Planned; not
