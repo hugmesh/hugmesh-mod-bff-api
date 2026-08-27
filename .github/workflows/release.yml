@@ -19,7 +19,7 @@ on:
   workflow_dispatch: {}
 
 env:
-  IMAGE_NAME: ghcr.io/hugmesh-net/hugmesh-mod-bff-api
+  IMAGE_NAME: ghcr.io/hugmesh/hugmesh-mod-bff-api
 
 jobs:
   build-image:
