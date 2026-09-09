@@ -681,8 +681,12 @@ public class ModService {
             out.put("external", outcome.result());
             out.put("blocked", action);
             if (outcome.isStubbed()) {
-                out.put("note", "external homeserver admin call is STUBBED (unconfirmed admin shape) — "
-                        + "action recorded in the local audit table only; reconcile applies the real effect");
+                out.put("note", "external homeserver admin call is STUBBED (integration disabled) — "
+                        + "action recorded in the local audit table only; no homeserver effect was applied");
+            } else if (outcome.isPosted()) {
+                out.put("note", "deactivate command posted to the tuwunel admin room (" + outcome.result()
+                        + ") — the admin bot applies it asynchronously and its reply is not yet correlated; "
+                        + "treat as pending until confirmed on the homeserver");
             }
             return out;
         }

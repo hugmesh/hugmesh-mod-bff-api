@@ -116,10 +116,14 @@ hugmesh:
 # External homeserver admin clients. Base URLs default to the in-cluster service DNS
 # grounded in hugmesh-generator manifests (tuwunel :8008, akkoma :4000). The akkoma
 # (mastodon) leg is WIRED to the confirmed pleroma-admin verbs (PATCH /users/deactivate,
-# DELETE /instances/{host}); the tuwunel (matrix) leg stays a flag-gated structured stub
-# (no HTTP admin API — admin-room bot only). Both enabled flags default FALSE so a
-# homeserver-less run boots clean and merging is INERT; flipping mastodon true also needs
-# admin-token to be present (else it degrades, never issuing an unauthenticated call).
+# DELETE /instances/{host}); the tuwunel (matrix) leg is WIRED to the admin-room command
+# transport for block-user (tuwunel has NO HTTP admin API: "!admin users deactivate
+# @user:server" is posted as an m.room.message into the admin room and the in-process
+# bot applies it ASYNCHRONOUSLY — so the outcome is posted:<event_id>, never ok, until
+# reply correlation lands; block-instance has no tuwunel verb and degrades). Both
+# enabled flags default FALSE so a homeserver-less run boots clean and merging is INERT;
+# flipping either true also needs its admin-token present (else it degrades, never
+# issuing an unauthenticated call).
 #
 # LIVE-STACK VERIFIED (2026-07, local compose stack, MASTODON_ADMIN_ENABLED=true in a
 # LOCAL run only — this shipped default stays false): mainline Mastodon 4.3.1 (the
@@ -135,6 +139,17 @@ external:
   matrix:
     base-url: "${MATRIX_BASE_URL:http://tuwunel.hugmesh-backend.svc.cluster.local:8008}"
     enabled: "${MATRIX_ADMIN_ENABLED:false}"
+    # Privileged Matrix access token of an ADMIN-ROOM MEMBER — injected from Vault
+    # hugmesh/tuwunel-admin (property "token") via the ESO ExternalSecret 'tuwunel-admin'
+    # in ns hugmesh-backend (the SAME secret the tuwunel-admin-sync Job mounts). Empty
+    # default; NEVER inline the token. Blank token => block-user degrades (never a false OK).
+    admin-token: "${MATRIX_ADMIN_TOKEN:}"
+    # The homeserver's server_name (manifests/tuwunel/tuwunel.yaml) — a bare localpart
+    # target is qualified to @localpart:<server-name> before the command is built.
+    server-name: "${MATRIX_SERVER_NAME:hugmesh.net}"
+    # The tuwunel admin room alias (admin_room_default in tuwunel.toml) — resolved to a
+    # room_id via /_matrix/client/v3/directory/room/{alias} and cached per process.
+    admin-room: "${MATRIX_ADMIN_ROOM:#admins:hugmesh.net}"
   mastodon:
     base-url: "${MASTODON_BASE_URL:http://akkoma.hugmesh-backend.svc.cluster.local:4000}"
     enabled: "${MASTODON_ADMIN_ENABLED:false}"

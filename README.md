@@ -57,8 +57,9 @@ security/tenancy code); conventions copied verbatim from `hugmesh-admin-bff-api`
   BFF **unswapped**, so this BFF resolves the session itself. See *Native-login
   (`bff_` session) support* below.
 
-Topology (solid = ✅ shipped call path; dashed = STUBBED Matrix call / 🔭 planned
-component; the akkoma block leg is ✅ wired-but-dark — real HTTP when enabled):
+Topology (solid = ✅ shipped call path; dashed = 🔭 planned component; both block legs
+are ✅ wired-but-dark — real HTTP when enabled; the Matrix leg posts an admin-room
+command whose effect is asynchronous, so it reports `posted`, never `ok`):
 
 ```mermaid
 flowchart LR
@@ -82,7 +83,7 @@ flowchart LR
     bff -->|"bearer fwd + mTLS<br/>ban/lift/domain-lock"| admin
     bff -->|"bearer fwd + mTLS<br/>hide/kill/restore"| owncast
     bff -->|"target role / org lookup"| casdoor
-    bff -.->|"block (STUBBED)"| matrix
+    bff -->|"block-user (✅ wired, dark; posted, never ok)"| matrix
     bff -->|"block (✅ wired, dark by default)"| akkoma
 
     classDef planned stroke-dasharray:4,stroke:#888;
@@ -130,7 +131,7 @@ resource-server filter chain path rule, and `@PreAuthorize` on every method.
 | `/bff/mod/moderation` | GET | List the federation moderation queue (`?status=`) | **federation-api** |
 | `/bff/mod/moderation` | POST | Record a recommendation (user→mod chain middle step) | **federation-api** + audit |
 | `/bff/mod/moderation/{id}/refer` | POST | **Refer / escalate** a request UP to an admin | **federation-api** + audit |
-| `/bff/mod/block` | POST | Server-wide block a user/instance on Matrix/Mastodon | **external** (Matrix STUBBED · akkoma ✅ wired, dark) + audit |
+| `/bff/mod/block` | POST | Server-wide block a user/instance on Matrix/Mastodon | **external** (Matrix ✅ wired, dark — `posted`, never `ok` · akkoma ✅ wired, dark) + audit |
 | `/bff/mod/ban` | POST | **Ban** a user from a platform-access role (writes desired-state) | **admin-bff** + audit |
 | `/bff/mod/ban` | DELETE | **Lift** a previously written ban | **admin-bff** + audit |
 | `/bff/mod/domain-lock/{role}/{user}` | POST | **Domain-lock** a user (force local-only / no-federation) | **admin-bff** + audit |
@@ -144,9 +145,10 @@ resource-server filter chain path rule, and `@PreAuthorize` on every method.
 | `/bff/mod/audit` | GET | Read the local moderator-action audit trail (`?mine=`, domain-scoped) | **own audit table** |
 | `/bff/mod/status` | GET | Caller's own moderator status (roles + domain) — UI polling for role-change detection | own JWT (no downstream) |
 
-**Ban vs. block.** `block` drives the homeserver admin call directly (the
-Matrix/tuwunel leg is STUBBED; the akkoma/Mastodon leg is ✅ wired-but-dark — real
-HTTP once enabled, see *Honest deferrals*); `ban` does NOT touch Casdoor or the
+**Ban vs. block.** `block` drives the homeserver admin call directly (both legs are
+✅ wired-but-dark — real HTTP once enabled; the Matrix/tuwunel leg posts an admin-room
+`!admin users deactivate` whose effect is asynchronous and not yet correlated, so it
+reports `posted:<event_id>`, never `ok` — see *Honest deferrals*); `ban` does NOT touch Casdoor or the
 homeserver itself — it writes the
 `access_suspension` **desired-state** in `hugmesh-admin-bff-api` (which owns the
 route-access DB + the single-writer reconcile loop) and the loop converges Casdoor
@@ -232,9 +234,12 @@ sequenceDiagram
   services grounded in `hugmesh-generator` manifests:
   `http://tuwunel.hugmesh-backend.svc.cluster.local:8008` (`MATRIX_BASE_URL`) and
   `http://akkoma.hugmesh-backend.svc.cluster.local:4000` (`MASTODON_BASE_URL`).
-  **The Matrix(tuwunel) admin HTTP call is STUBBED**; **the Mastodon(akkoma) admin
-  HTTP call is ✅ wired but dark by default** — it issues real pleroma-admin HTTP only
-  when `external.mastodon.enabled=true` AND a Vault/ESO admin token is present, and is
+  **Both admin calls are ✅ wired but dark by default** — akkoma issues real
+  pleroma-admin HTTP only when `external.mastodon.enabled=true` AND a Vault/ESO admin
+  token is present; tuwunel posts the `!admin users deactivate` admin-room command only
+  when `external.matrix.enabled=true` AND `external.matrix.admin-token` (Vault
+  `hugmesh/tuwunel-admin` via ESO secret `tuwunel-admin`) is present, and reports
+  `posted:<event_id>` (never `ok`) because the bot applies it asynchronously; both are
   inert otherwise (see *Honest deferrals*).
 - **admin-bff** (`hugmesh-admin-bff-api`) — the ban/lift surface writes the
   `access_suspension` desired-state via `POST/DELETE /bff/admin/access-roles/{role}/{user}`,
@@ -626,17 +631,34 @@ initContainer) and the generator-owned deployment requirement.
 
 ## Honest deferrals
 
-- **Matrix(tuwunel) admin call is STUBBED; Mastodon(akkoma) is wired-but-dark.** The
-  reactive `WebClient`s are wired and ready in both clients; the two legs now differ:
-  - **tuwunel (Matrix) — STUBBED.** A Conduit-family server with, per the generator
-    manifest + upstream source, **no Synapse-style `/_synapse/admin` REST API and no
-    HTTP admin surface at all** — server-admin verbs are `!admin ...` text commands
-    posted as `m.room.message` events into the admin room (`#admins:hugmesh.net`)
-    and answered asynchronously by an in-process bot. A real wire-up needs a small
-    persistent Matrix client (token lifecycle, alias→room_id resolution, txn ids,
-    async-reply correlation), deliberately NOT half-built here. So
-    `MatrixAdminClient.doBlock(...)` returns `BlockOutcome.STUBBED` **even when
-    `external.matrix.enabled=true`** (logged loudly), and there is nothing to flip.
+- **Both homeserver admin calls are wired-but-dark; the Matrix one never reports
+  `ok`.** The reactive `WebClient`s are wired in both clients; the two legs differ:
+  - **tuwunel (Matrix) — ✅ WIRED for block-user, dark by default, `posted` never
+    `ok`.** A Conduit-family server with, per the generator manifest + upstream
+    source, **no Synapse-style `/_synapse/admin` REST API and no HTTP admin surface
+    at all** — server-admin verbs are `!admin ...` text commands posted as
+    `m.room.message` events into the admin room (`#admins:hugmesh.net`) and answered
+    asynchronously by an in-process bot. When `external.matrix.enabled=true` AND
+    `external.matrix.admin-token` is present (Vault `hugmesh/tuwunel-admin` property
+    `token` via the ESO secret `tuwunel-admin` — the same one the generator's
+    `tuwunel-admin-sync` Job mounts), `MatrixAdminClient` resolves the admin-room
+    alias once (`GET /_matrix/client/v3/directory/room/{alias}`, cached) and PUTs
+    `!admin users deactivate @localpart:server` with a fresh txnId
+    (`/_matrix/client/v3/rooms/{roomId}/send/m.room.message/{txnId}`). The outcome is
+    `posted:<event_id>` — the HTTP 200 only ACKs that the command message landed in
+    the room, not that the bot applied it — so the controller stays at 202
+    pending-reconcile and the event id is the audit row's correlation handle. Still
+    deferred: **reply correlation** (reading the bot's `m.in_reply_to` answer back and
+    pinning its success/failure text against the deployed tuwunel — only then may an
+    outcome become `ok`), **block-instance** (no runtime per-server federation-block
+    verb exists; the leg degrades `no-tuwunel-verb`, the generator egress
+    NetworkPolicy is the backstop) and **un-block** (no `activate` verb). Off (the
+    default) it returns `STUBBED` with no HTTP; on without a token it degrades
+    `no-admin-token` rather than posting unauthenticated. A target that is not a
+    plain MXID (whitespace, newline) is refused before any HTTP so it can never widen
+    the text command. The deployment side (mounting `tuwunel-admin` into this pod as
+    `MATRIX_ADMIN_TOKEN`, flipping `MATRIX_ADMIN_ENABLED`) lives in the generator and
+    has not been flipped anywhere.
   - **akkoma (Mastodon) — ✅ WIRED, dark by default.** The request shapes **are**
     pinned in code (`PATCH /api/v1/pleroma/admin/users/deactivate` with
     `{"nicknames":[localpart]}` for block-user, `DELETE
@@ -699,7 +721,8 @@ initContainer) and the generator-owned deployment requirement.
   fail-closed isolation on audit reads + write confinement, composite
   `(dedup_key, domain)` uniqueness).
 - **✅ Mod surface shipped:** moderation queue/recommend/refer, server-wide block
-  (Matrix/tuwunel call STUBBED; akkoma/Mastodon call ✅ wired, dark by default),
+  (Matrix/tuwunel admin-room command ✅ wired, dark by default, `posted` never `ok`;
+  akkoma/Mastodon call ✅ wired, dark by default),
   access-role ban/lift, domain-lock/unlock, owncast hide/kill/restore (the
   `/bff/mod/owncast/**` central wiring → owncast-bff effector + `owncast.*` ledger
   rows), modules
@@ -731,12 +754,18 @@ work as done:
   subsystem and are landing there; minimal user-preference / silencing tables are
   part of that work. No further mod-bff code change is required for the directive
   itself.
-- 🔭 **Matrix(tuwunel) real `doBlock`.** The tuwunel block call remains **STUBBED**
-  (see *Honest deferrals*): tuwunel has no HTTP admin API, so the real admin-room
-  bot-command path needs a small persistent Matrix client and is an unconfirmed
-  follow-up, kept deferred (not shipped). The akkoma/Mastodon leg is **already wired**
-  (✅, dark by default) and only awaits live verification against a real akkoma
-  instance — it is no longer a deferred follow-up.
+- 🔭 **Matrix(tuwunel) reply correlation + live pin.** The admin-room
+  `!admin users deactivate` post is ✅ wired (dark by default, see *Honest
+  deferrals*) but its outcome is `posted:<event_id>`, never `ok`, until the bot's
+  asynchronous reply is read back (`/rooms/{id}/messages` or `/sync`, matching
+  `m.relates_to.m.in_reply_to.event_id` to the posted id) and its success/failure
+  text is pinned against the deployed tuwunel v1.7.0. Also open: which service owns
+  the Matrix effect long-term (this direct fire-once post vs. admin-bff's
+  desired-state reconcile loop, whose tuwunel leg is the same stub), the generator
+  wiring of `tuwunel-admin` into this pod, and the no-`activate`-verb un-block model.
+  The akkoma/Mastodon leg is **already wired** (✅, dark by default) and only awaits
+  live verification against a real akkoma instance — it is no longer a deferred
+  follow-up.
 - 🔭 **Casdoor MFA step-up — the CHALLENGE half.** The mod-bff **enforcement** half is
   ✅ shipped and documented above (*Step-up MFA on sensitive write-effects*): ban / lift
   / domain-lock / unlock / block require the `MFA_SATISFIED` marker when
@@ -806,7 +835,7 @@ src/main/java/net/hugmesh/modbff
   auth/                             native-login bff_ session bridge — BffCookieAuthenticationWebFilter + AdminBffSessionIntrospectClient/Config (see *Native-login (bff_ session) support*)
   federation/                       federation-api WebClient client + DTOs + bearer-forward filter + outbound mTLS + the native-login custody-exchange (SessionExchangeService/Client/Cache/Config, BffRawTokenContextWebFilter, ships dark behind app.bff-exchange.enabled)
   admin/                            admin-bff suspension/domain-lock clients + Casdoor role lookup (org-map, belongsToDomain)
-  external/                         Matrix(tuwunel) admin client (STUBBED) + Mastodon(akkoma) admin client (✅ wired, dark) + config
+  external/                         Matrix(tuwunel) admin-room command client (✅ wired, dark — posted, never ok) + Mastodon(akkoma) admin client (✅ wired, dark) + config
   owncast/                          owncast-bff moderation client (hide/kill/restore) + config
   audit/                            mod_action R2DBC repository + record + action types + dedup key
   notify/NotifyDirective.java       service-scoped @system notification directive (ships dark)
