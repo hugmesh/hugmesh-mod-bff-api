@@ -34,6 +34,7 @@ external:
   matrix:
     base-url: "http://localhost:0"
     enabled: false
+    admin-token: ""
   mastodon:
     base-url: "http://localhost:0"
     enabled: false
