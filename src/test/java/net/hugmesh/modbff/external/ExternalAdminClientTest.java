@@ -191,6 +191,39 @@ class ExternalAdminClientTest {
     }
 
     @Test
+    void matrixBlockUser_sendRejectedAfterCachedRoom_dropsCache_andReResolvesNextCall() {
+        // Populate the cache first (GET + PUT), then have the homeserver 403 the PUT alone
+        // (the cache means no GET is issued), then recover: the next call MUST re-issue
+        // the directory GET, proving degradeHttp dropped the cached room id (a recreated
+        // admin room would otherwise be posted into a dead room id forever).
+        Recorder rec = matrixRecorder();
+        MatrixAdminClient client = matrix(rec, true, "secret-tok");
+        StepVerifier.create(client.blockUser("@a:evil.example"))
+                .assertNext(o -> assertThat(o.isPosted()).isTrue())
+                .verifyComplete();
+        assertThat(rec.requests).hasSize(2); // GET, PUT — cache populated
+
+        rec.status.set(HttpStatus.FORBIDDEN);
+        StepVerifier.create(client.blockUser("@b:evil.example"))
+                .assertNext(o -> {
+                    assertThat(o.result()).isEqualTo("degraded:http-403");
+                    assertThat(o.isOk()).isFalse();
+                })
+                .verifyComplete();
+        assertThat(rec.requests).hasSize(3); // PUT only — the cached room id was used
+        assertThat(rec.requests.get(2).method()).isEqualTo(HttpMethod.PUT);
+
+        rec.status.set(HttpStatus.OK);
+        StepVerifier.create(client.blockUser("@c:evil.example"))
+                .assertNext(o -> assertThat(o.isPosted()).isTrue())
+                .verifyComplete();
+        assertThat(rec.requests).hasSize(5); // GET (re-resolved), PUT
+        assertThat(rec.requests.get(3).method()).isEqualTo(HttpMethod.GET);
+        assertThat(rec.requests.get(3).url().getRawPath()).contains("/directory/room/");
+        assertThat(rec.requests.get(4).method()).isEqualTo(HttpMethod.PUT);
+    }
+
+    @Test
     void matrixBlockUser_aliasResolvesWithoutRoomId_degrades_noSend() {
         Recorder rec = new Recorder(); // answers {} to everything — no room_id
         StepVerifier.create(matrix(rec, true, "secret-tok").blockUser("@spam:evil.example"))
