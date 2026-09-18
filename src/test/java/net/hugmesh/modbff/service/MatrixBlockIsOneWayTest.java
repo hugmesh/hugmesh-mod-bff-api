@@ -29,28 +29,43 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
- * A MATRIX BLOCK IS ONE-WAY, AND NOTHING IN THIS SERVICE CAN UNDO IT — the measured
- * asymmetry behind hugmesh-mod-bff-api#1(b), pinned so it is a guard rather than only
- * prose in a javadoc.
+ * <b>Renamed in substance, not in name, by operator decision 51 (2026-09-18, answer
+ * B — AGAINST the "leave deactivate" recommendation).</b> This class used to pin that a
+ * Matrix block is a permanent one-way door: {@code MatrixAdminClient} was the only
+ * homeserver seam {@code ModService.block(...)} reached, its only verb was the
+ * irreversible {@code !admin users deactivate}, and neither {@code lift(...)} nor
+ * {@code domainUnlock(...)} touched a homeserver client — so once posted, nothing in
+ * this service could undo it. That is EXACTLY the property the operator answered
+ * against: <i>"This reverses decision 5"</i> (2026-09-10: "deactivate").
  *
- * <p><b>What is measured.</b> {@code MatrixAdminClient} is reached from exactly one place,
- * {@code ModService.block(...)} (the {@code case MATRIX} routing at {@code ModService:264}),
- * and the only verb it can post is {@code !admin users deactivate} — tuwunel has no
- * {@code !admin users activate}. {@code lift(...)} and {@code domainUnlock(...)}, the two
- * calls a moderator would reach for to reverse something, clear Casdoor / admin-bff
- * DESIRED-STATE only and never touch a homeserver client at all. So once the transport is
- * armed and a block has been posted, this BFF has no path that lifts it.
+ * <p><b>What is pinned now — the opposite property, for the MOD path specifically:</b>
+ * <ul>
+ *   <li>a MOD-initiated Matrix USER block ({@code ModService.block("matrix","user",...)})
+ *       no longer reaches {@link MatrixAdminClient} at all — it writes the SAME
+ *       {@code domain_lock} desired-state {@link ModService#domainLock} does, through
+ *       {@link AdminDomainLockClient#lock};</li>
+ *   <li>that write is REVERSED end to end by the SAME path a plain domain-lock uses:
+ *       {@code ModService.domainUnlock("ROLE_MATRIX_DOMAINLOCKED", target, ...)} calls
+ *       {@link AdminDomainLockClient#unlock}, which is the exact undo of the {@code lock}
+ *       call the block issued — so "block, then domain-unlock" is a real round trip, not
+ *       a door with no handle on the other side;</li>
+ *   <li>the deactivate transport ({@link MatrixAdminClient#blockUser},
+ *       {@code DEACTIVATE_COMMAND}) is UNCHANGED (kept for a future ADMIN-only path with
+ *       its own explicit confirmation — none exists yet, hugmesh-mod-bff-api#23) but is
+ *       now UNREACHABLE from the MOD block surface: nothing in {@link ModService} calls
+ *       it any more, for any platform/scope/role combination reachable from
+ *       {@code ModController}. {@code MatrixAdminClient} still exposes no
+ *       un-block/activate verb either, so the transport that DOES exist could not be
+ *       made reversible even if something started calling it again.</li>
+ * </ul>
  *
- * <p>Independently corroborated in a sibling repo: hugmesh-admin-bff-api's
- * {@code homeserver/HomeserverAdminClient} models its own re-activate leg as
- * {@code activate(no-tuwunel-verb)} and says in its javadoc that there is "NO activate
- * command at all". <b>Neither is primary evidence</b> — no run against a live tuwunel has
- * ever been made, and none is possible in this lane.
- *
- * <p><b>This test asserts the CURRENT state, it does not endorse it.</b> If it ever goes
- * red because an un-block path was added, that is the point: modelling the reversal is an
- * operator decision (what a lift should mean when the forward verb is irreversible), not
- * an implementation detail to slip in. See the decision proposed on hugmesh-generator#347.
+ * <p><b>This test asserts the CURRENT state, it does not endorse it as the end state.</b>
+ * If it ever goes red because {@link MatrixAdminClient#blockUser} became reachable again
+ * from {@link ModService}, that is the point: routing MOD traffic back onto the
+ * irreversible transport is exactly what decision 51 forbade — it would need a new
+ * decision (or a genuine, confirmation-gated ADMIN path), not a quiet revert. Neither
+ * this test nor its predecessor is primary evidence against a live tuwunel — no run has
+ * been made in this lane either.
  */
 class MatrixBlockIsOneWayTest {
 
@@ -87,6 +102,7 @@ class MatrixBlockIsOneWayTest {
         when(roles.isPrivileged(anyString(), any())).thenReturn(Mono.just(false));
         when(roles.belongsToDomain(anyString(), any())).thenReturn(Mono.just(true));
         when(suspensions.clear(anyString(), anyString())).thenReturn(Mono.just(SuspensionOutcome.PENDING));
+        when(domainLocks.lock(anyString(), anyString(), any())).thenReturn(Mono.just(SuspensionOutcome.PENDING));
         when(domainLocks.unlock(anyString(), anyString())).thenReturn(Mono.just(SuspensionOutcome.PENDING));
         when(audit.recordBan(anyString(), anyString(), anyString(), anyString(), anyString(),
                 any(), any(), any(), anyString(), anyString()))
@@ -94,20 +110,61 @@ class MatrixBlockIsOneWayTest {
         when(audit.record(anyString(), anyString(), anyString(), anyString(), any(), anyString(), anyString()))
                 .thenReturn(Mono.just(row("matrix.block-user")));
         when(matrix.blockUser(anyString())).thenReturn(Mono.just(BlockOutcome.STUBBED));
+        when(matrix.blockInstance(anyString())).thenReturn(Mono.just(BlockOutcome.requested("no-tuwunel-verb")));
     }
 
-    /** The forward direction exists: a matrix block DOES reach the homeserver client. Without
-     *  this the two assertions below could both pass on a service that never calls it at all. */
+    /** The forward direction is now domain-lock, not the homeserver client. */
     @Test
-    void block_doesReachTheMatrixClient() {
+    void matrixUserBlock_writesADomainLock_notTheHomeserverClient() {
         StepVerifier.create(service.block("matrix", "user", "@spam:evil.example", "abuse",
                         auth("mod:bob", "ROLE_MOD", "ROLE_MATRIX", "DOMAIN_default")))
-                .expectNextCount(1)
+                .assertNext(result -> org.assertj.core.api.Assertions.assertThat(result.outcome())
+                        .isEqualTo(BlockOutcome.DOMAIN_LOCKED))
                 .verifyComplete();
-        verify(matrix).blockUser("@spam:evil.example");
+        verify(domainLocks).lock("matrix", "@spam:evil.example", "abuse");
+        verifyNoInteractions(matrix);
     }
 
-    /** Lifting a ban clears desired-state only — it cannot un-deactivate a Matrix account. */
+    /** The DEACTIVATE transport specifically ({@code blockUser}, the irreversible verb) is
+     *  unreachable from the MOD path: nothing ModService can be asked to do (block on
+     *  either scope, lift, domainLock, domainUnlock) calls it. block-INSTANCE is
+     *  untouched by decision 51 (it is decision 50's territory — see
+     *  {@code ExternalAdminClientTest}) and legitimately still calls
+     *  {@code matrix.blockInstance}. */
+    @Test
+    void deactivateTransport_isUnreachableFromTheModPath() {
+        Authentication mod = auth("mod:bob", "ROLE_MOD", "ROLE_MATRIX", "DOMAIN_default");
+        StepVerifier.create(service.block("matrix", "user", "@spam:evil.example", "abuse", mod))
+                .expectNextCount(1).verifyComplete();
+        StepVerifier.create(service.block("matrix", "instance", "evil.example", "abuse", mod))
+                .expectNextCount(1).verifyComplete();
+        StepVerifier.create(service.lift("matrix", "alice", null, mod))
+                .expectNextCount(1).verifyComplete();
+        StepVerifier.create(service.domainLock("ROLE_MATRIX_DOMAINLOCKED", "alice", "evasion", null, mod))
+                .expectNextCount(1).verifyComplete();
+        StepVerifier.create(service.domainUnlock("ROLE_MATRIX_DOMAINLOCKED", "alice", null, mod))
+                .expectNextCount(1).verifyComplete();
+        verify(matrix, never()).blockUser(anyString());
+        verify(matrix).blockInstance("evil.example");
+    }
+
+    /** Reversibility end to end: the SAME target's block (domain-lock WRITE) and a
+     *  domain-unlock (domain-lock CLEAR) drive the identical admin-bff platform/user
+     *  pair — "block, then domain-unlock" is a genuine round trip on this platform. */
+    @Test
+    void domainUnlock_reversesExactlyWhatTheMatrixUserBlockWrote() {
+        Authentication mod = auth("mod:bob", "ROLE_MOD", "ROLE_MATRIX", "DOMAIN_default");
+        StepVerifier.create(service.block("matrix", "user", "alice", "evasion", mod))
+                .expectNextCount(1).verifyComplete();
+        StepVerifier.create(service.domainUnlock("ROLE_MATRIX_DOMAINLOCKED", "alice", null, mod))
+                .expectNextCount(1).verifyComplete();
+        verify(domainLocks).lock("matrix", "alice", "evasion");
+        verify(domainLocks).unlock("matrix", "alice");
+    }
+
+    /** Lifting a BAN still clears access_suspension desired-state only — unrelated to a
+     *  Matrix domain-lock and still never reaches any homeserver client. Kept from the
+     *  predecessor test: lift's own contract did not change. */
     @Test
     void lift_neverReachesAnyHomeserverClient() {
         StepVerifier.create(service.lift("matrix", "alice", null,
@@ -118,26 +175,10 @@ class MatrixBlockIsOneWayTest {
         verifyNoInteractions(mastodon);
     }
 
-    /** Domain-unlock likewise: marker removal, no homeserver verb. */
+    /** MatrixAdminClient still exposes no un-block/activate verb — even if something
+     *  started calling it again, there would be nothing to reverse it with. */
     @Test
-    void domainUnlock_neverReachesAnyHomeserverClient() {
-        StepVerifier.create(service.domainUnlock("ROLE_MATRIX_DOMAINLOCKED", "alice", null,
-                        auth("mod:bob", "ROLE_MOD", "ROLE_MATRIX", "DOMAIN_default")))
-                .expectNextCount(1)
-                .verifyComplete();
-        verifyNoInteractions(matrix);
-        verifyNoInteractions(mastodon);
-    }
-
-    /** And the forward path itself has exactly one verb: nothing ever asks the client to
-     *  reverse a block, because the client has no such method to call. */
-    @Test
-    void theMatrixClientIsNeverAskedToReverseABlock() {
-        StepVerifier.create(service.block("matrix", "user", "@spam:evil.example", "abuse",
-                        auth("mod:bob", "ROLE_MOD", "ROLE_MATRIX", "DOMAIN_default")))
-                .expectNextCount(1)
-                .verifyComplete();
-        verify(matrix, never()).blockInstance(anyString());
+    void theMatrixClientStillExposesNoUnblockVerb() {
         org.assertj.core.api.Assertions.assertThat(MatrixAdminClient.class.getMethods())
                 .as("MatrixAdminClient exposes no un-block / activate verb")
                 .noneMatch(m -> m.getName().toLowerCase(java.util.Locale.ROOT).contains("activate")
