@@ -29,6 +29,7 @@ import net.hugmesh.commons.config.TenancyResourceServerConfig;
 import net.hugmesh.commons.security.CasdoorAuthorities;
 import net.hugmesh.commons.security.DomainRegistry;
 import net.hugmesh.modbff.auth.BffCookieAuthenticationWebFilter;
+import net.hugmesh.modbff.security.ModStepUpAccessDeniedHandler;
 import net.hugmesh.modbff.security.ModStepUpGate;
 
 /**
@@ -150,10 +151,12 @@ public class SecurityConfig {
      */
     @Bean
     @Profile({"dev", "test"})
-    SecurityWebFilterChain devFilterChain(final ServerHttpSecurity http) {
+    SecurityWebFilterChain devFilterChain(final ServerHttpSecurity http,
+                                          final ModStepUpAccessDeniedHandler stepUpAccessDenied) {
         return http
                 .csrf(ServerHttpSecurity.CsrfSpec::disable)
                 .headers(SecurityConfig::hardenedHeaders)
+                .exceptionHandling(e -> e.accessDeniedHandler(stepUpAccessDenied))
                 .authorizeExchange(ex -> {
                     commonRoutes(ex);
                     ex.pathMatchers(SPEC_PATHS).permitAll();
@@ -171,10 +174,12 @@ public class SecurityConfig {
      */
     @Bean
     @Profile("!dev & !test")
-    SecurityWebFilterChain filterChain(final ServerHttpSecurity http) {
+    SecurityWebFilterChain filterChain(final ServerHttpSecurity http,
+                                       final ModStepUpAccessDeniedHandler stepUpAccessDenied) {
         return http
                 .csrf(ServerHttpSecurity.CsrfSpec::disable)
                 .headers(SecurityConfig::hardenedHeaders)
+                .exceptionHandling(e -> e.accessDeniedHandler(stepUpAccessDenied))
                 .authorizeExchange(ex -> {
                     commonRoutes(ex);
                     ex.pathMatchers(SPEC_PATHS).hasAnyRole("ADMIN", "SUPERADMIN");
@@ -304,6 +309,27 @@ public class SecurityConfig {
     ModStepUpGate modStepUpGate(
             @Value("${app.mfa.enforce-sensitive-writes:false}") boolean enforceSensitiveWrites) {
         return new ModStepUpGate(enforceSensitiveWrites);
+    }
+
+    /**
+     * The chain's {@code accessDeniedHandler}, installed on BOTH profiles so the two cannot
+     * drift. It is a PASS-THROUGH to Spring Security's default
+     * {@code HttpStatusServerAccessDeniedHandler(FORBIDDEN)} for every refusal except the one
+     * narrow case it exists for — an ARMED step-up gate refusing one of
+     * {@link ModStepUpGate#SENSITIVE_WRITES} to a caller who DID pass the role half — which it
+     * renders with the {@code X-Step-Up-Required} signal and the legacy phrase so
+     * hugmesh-mod-ui can tell "you need a fresh second factor" from "you may not ban a
+     * moderator". See hugmesh-mod-bff-api#16.
+     *
+     * <p>It changes no authorization rule: every {@code @PreAuthorize} expression and every
+     * {@code authorizeExchange} rule above is untouched, and this handler runs only AFTER a
+     * denial has already been decided. It can never turn a denial into a grant — it only ever
+     * writes a 403.
+     */
+    @Bean
+    ModStepUpAccessDeniedHandler modStepUpAccessDeniedHandler(ModStepUpGate modStepUpGate,
+                                                             RoleHierarchy roleHierarchy) {
+        return new ModStepUpAccessDeniedHandler(modStepUpGate, roleHierarchy);
     }
 
     private ReactiveJwtAuthenticationConverter jwtConverter() {

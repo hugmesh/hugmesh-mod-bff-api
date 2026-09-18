@@ -1,6 +1,11 @@
 package net.hugmesh.modbff.security;
 
+import org.springframework.http.HttpMethod;
 import org.springframework.security.core.Authentication;
+
+import net.hugmesh.modbff.web.StepUpRequiredException;
+
+import java.util.List;
 
 /**
  * STEP-UP (second-factor) gate for the SENSITIVE mod write-effects — the
@@ -43,6 +48,67 @@ import org.springframework.security.core.Authentication;
  */
 public class ModStepUpGate {
 
+    /**
+     * The step-up FLAVOUR this BFF advertises, in the platform's {@code X-<flavour>-StepUp}
+     * spelling (admin-bff's gates each own one; {@code X-ImageGen-StepUp} is the reference).
+     * It is the VALUE of the {@value StepUpRequiredException#SIGNAL_HEADER} response header on
+     * a step-up refusal.
+     *
+     * <p><b>It is not a request header this service reads.</b> This gate has no token leg —
+     * {@link #satisfied(Authentication)} consumes the {@code MFA_SATISFIED} marker authority
+     * and nothing else — so the client's follow-up is a challenge that stamps the session
+     * followed by a plain RETRY, not a token echoed back here. It is advertised so the flavour
+     * is observable and so a future token leg needs no client change. See
+     * {@link StepUpRequiredException} for the whole contract.
+     */
+    public static final String STEP_UP_HEADER = "X-Mod-StepUp";
+
+    /**
+     * One sensitive write-effect: the request shape that carries the step-up conjunct, plus
+     * the verb that reads in its refusal message.
+     *
+     * @param method       the HTTP method of the mapping
+     * @param pathPatterns every path template the mapping answers on, VERBATIM as
+     *                     {@code ModController} spells them (trailing-slash variants included)
+     * @param verb         the operation as it reads in the refusal, e.g. {@code "banning a user"}
+     */
+    public record SensitiveWrite(HttpMethod method, List<String> pathPatterns, String verb) {
+        public SensitiveWrite {
+            pathPatterns = List.copyOf(pathPatterns);
+        }
+    }
+
+    /**
+     * The FIVE sensitive write-effects, as request shapes.
+     *
+     * <p><b>Why this list exists at all.</b> {@link ModStepUpAccessDeniedHandler} has to decide
+     * whether a 403 it is about to render was the STEP-UP leg failing or an ordinary role
+     * refusal, and a denial carries no record of which conjunct said no. Scoping the signal to
+     * exactly these request shapes — together with the handler's own check that the ROLE half
+     * passed — is what stops a plain {@code ROLE_USER}'s bare role 403 on {@code POST
+     * /bff/mod/block} from popping an MFA dialog that could not possibly help them.
+     *
+     * <p><b>It is a SECOND copy of a list whose first copy is the {@code @PreAuthorize}
+     * annotations, so it can drift.</b> That is closed by
+     * {@code ModStepUpConjunctInventoryTest}, which derives BOTH sets reflectively at runtime
+     * (the annotation expressions on one side, this list on the other) and fails if they are
+     * not equal — so a sixth gated endpoint that forgets this list, or an entry here with no
+     * gate, is a red build rather than a silently unsignalled denial.
+     */
+    public static final List<SensitiveWrite> SENSITIVE_WRITES = List.of(
+            new SensitiveWrite(HttpMethod.POST, List.of("/bff/mod/block"),
+                    "blocking a user or instance server-wide"),
+            new SensitiveWrite(HttpMethod.POST, List.of("/bff/mod/ban"),
+                    "banning a user from a platform-access role"),
+            new SensitiveWrite(HttpMethod.DELETE, List.of("/bff/mod/ban"),
+                    "lifting a platform-access ban"),
+            new SensitiveWrite(HttpMethod.POST,
+                    List.of("/bff/mod/domain-lock/{role}/{user}", "/bff/mod/domain-lock/{role}/{user}/"),
+                    "domain-locking a user"),
+            new SensitiveWrite(HttpMethod.DELETE,
+                    List.of("/bff/mod/domain-lock/{role}/{user}", "/bff/mod/domain-lock/{role}/{user}/"),
+                    "domain-unlocking a user"));
+
     /** Whether the step-up requirement is ARMED ({@code app.mfa.enforce-sensitive-writes}). */
     private final boolean enforced;
 
@@ -67,5 +133,23 @@ public class ModStepUpGate {
             return true;                 // dark default — byte-identical legacy behaviour
         }
         return Roles.isMfaSatisfied(auth);
+    }
+
+    /**
+     * The refusal to emit when {@link #satisfied(Authentication)} is false — the ONE place
+     * this BFF's step-up flavour is bound to the platform exception, so a caller cannot
+     * hand-roll a 403 that a client cannot recognise.
+     *
+     * <p>Deliberately SEPARATE from {@link #satisfied(Authentication)} rather than folded into
+     * it: the predicate is called from a {@code @PreAuthorize} SpEL expression, and a boolean
+     * that threw would be a side-effecting predicate whose exception escapes through the
+     * authorization manager. Nothing about WHAT is denied moves — the conjunct still decides —
+     * this only supplies the words and the flavour for the refusal
+     * {@link ModStepUpAccessDeniedHandler} renders.
+     *
+     * @param verb the operation as it reads in the message, e.g. {@code "banning a user"}
+     */
+    public static StepUpRequiredException denial(String verb) {
+        return StepUpRequiredException.forRetryHeader(STEP_UP_HEADER, verb);
     }
 }

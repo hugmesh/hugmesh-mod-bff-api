@@ -21,13 +21,16 @@ import net.hugmesh.modbff.external.BlockOutcome;
 import net.hugmesh.modbff.external.MastodonAdminClient;
 import net.hugmesh.modbff.external.MatrixAdminClient;
 import net.hugmesh.modbff.federation.FederationApiClient;
+import net.hugmesh.modbff.security.ModStepUpGate;
 import net.hugmesh.modbff.security.Roles;
 import net.hugmesh.modbff.service.ModService;
 import net.hugmesh.modbff.web.ApiExceptionHandler;
+import net.hugmesh.modbff.web.StepUpRequiredException;
 import net.hugmesh.modbff.web.ValidationExceptionHandler;
 
 import java.time.LocalDateTime;
 
+import static org.hamcrest.Matchers.containsStringIgnoringCase;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.eq;
@@ -103,48 +106,131 @@ class ModStepUpGateControllerTest {
                 "deadbeef", "user", null, "pending");
     }
 
-    // ── DENY: no step-up marker ⇒ 403, and the service is never called ─────────
+    /** A caller with no moderator role at all — refused by the chain's {@code /bff/mod/**}
+     *  rule on the very same paths, through the very same access-denied handler. */
+    private WebTestClient asPlainUser() {
+        return web.mutateWith(mockJwt().authorities(
+                new SimpleGrantedAuthority("ROLE_USER"), new SimpleGrantedAuthority("DOMAIN_default")));
+    }
+
+    /**
+     * THE WIRE SHAPE OF A STEP-UP DENIAL — asserted on every one of the five, because the
+     * whole defect (#16) was that a step-up refusal was indistinguishable from a role refusal.
+     * Status stays 403 (unchanged), and the refusal now carries BOTH legs hugmesh-mod-ui
+     * reads: the structured {@code X-Step-Up-Required} header whose value is this BFF's
+     * flavour, and the legacy free-text phrase inside the {@code {"error": …}} body.
+     */
+    private static void expectStepUpSignal(WebTestClient.ResponseSpec response) {
+        response.expectStatus().isForbidden()
+                .expectHeader().valueEquals(StepUpRequiredException.SIGNAL_HEADER,
+                        ModStepUpGate.STEP_UP_HEADER)
+                .expectBody().jsonPath("$.error")
+                        .value(containsStringIgnoringCase(StepUpRequiredException.LEGACY_PHRASE));
+    }
+
+    /** A denial that is NOT a step-up requirement must carry NO signal — otherwise mod-ui
+     *  offers an MFA challenge that cannot possibly let the caller through. */
+    private static void expectNoStepUpSignal(WebTestClient.ResponseSpec response) {
+        response.expectHeader().doesNotExist(StepUpRequiredException.SIGNAL_HEADER);
+    }
+
+    // ── DENY: no step-up marker ⇒ 403 + the signal, and the service is never called ─────
     @Test
     void ban_forbiddenWithoutStepUp_andServiceNeverCalled() {
-        asMod().post().uri("/bff/mod/ban").contentType(MediaType.APPLICATION_JSON)
+        expectStepUpSignal(asMod().post().uri("/bff/mod/ban").contentType(MediaType.APPLICATION_JSON)
                 .bodyValue("{\"platform\":\"matrix\",\"target\":\"alice\",\"reason\":\"abuse\"}")
-                .exchange().expectStatus().isForbidden();
+                .exchange());
         verify(mod, never()).ban(any(), any(), any(), any(), any(), any(), anyBoolean(), any());
     }
 
     @Test
     void lift_forbiddenWithoutStepUp() {
-        asMod().method(org.springframework.http.HttpMethod.DELETE).uri("/bff/mod/ban")
+        expectStepUpSignal(asMod().method(org.springframework.http.HttpMethod.DELETE).uri("/bff/mod/ban")
                 .contentType(MediaType.APPLICATION_JSON)
                 .bodyValue("{\"platform\":\"matrix\",\"target\":\"alice\"}")
-                .exchange().expectStatus().isForbidden();
+                .exchange());
         verify(mod, never()).lift(any(), any(), any(), any());
     }
 
     @Test
     void block_forbiddenWithoutStepUp_andServiceNeverCalled() {
-        asMod().post().uri("/bff/mod/block").contentType(MediaType.APPLICATION_JSON)
+        expectStepUpSignal(asMod().post().uri("/bff/mod/block").contentType(MediaType.APPLICATION_JSON)
                 .bodyValue("{\"platform\":\"matrix\",\"scope\":\"user\",\"target\":\"@spam:evil.example\"}")
-                .exchange().expectStatus().isForbidden();
+                .exchange());
         verify(mod, never()).block(any(), any(), any(), any(), any());
     }
 
     @Test
     void domainLock_forbiddenWithoutStepUp_andServiceNeverCalled() {
-        asMod().post().uri("/bff/mod/domain-lock/ROLE_MATRIX_DOMAINLOCKED/alice")
+        expectStepUpSignal(asMod().post().uri("/bff/mod/domain-lock/ROLE_MATRIX_DOMAINLOCKED/alice")
                 .contentType(MediaType.APPLICATION_JSON).bodyValue("{\"reason\":\"abuse\"}")
-                .exchange().expectStatus().isForbidden();
+                .exchange());
         verify(mod, never()).domainLock(any(), any(), any(), any(), any());
     }
 
     @Test
     void domainUnlock_forbiddenWithoutStepUp() {
-        asMod().method(org.springframework.http.HttpMethod.DELETE)
+        expectStepUpSignal(asMod().method(org.springframework.http.HttpMethod.DELETE)
                 .uri("/bff/mod/domain-lock/ROLE_MATRIX_DOMAINLOCKED/alice")
                 .contentType(MediaType.APPLICATION_JSON)
                 .bodyValue("{\"reason\":\"abuse\"}")
-                .exchange().expectStatus().isForbidden();
+                .exchange());
         verify(mod, never()).domainUnlock(any(), any(), any(), any());
+    }
+
+    /** {@code ModController} maps BOTH the bare and the trailing-slash spelling of
+     *  domain-lock, so the handler's matcher has to carry both or one of the two gated
+     *  shapes denies without a signal. */
+    @Test
+    void domainLock_trailingSlash_forbiddenWithoutStepUp_carriesTheSignal() {
+        expectStepUpSignal(asMod().post().uri("/bff/mod/domain-lock/ROLE_MATRIX_DOMAINLOCKED/alice/")
+                .contentType(MediaType.APPLICATION_JSON).bodyValue("{\"reason\":\"abuse\"}")
+                .exchange());
+        verify(mod, never()).domainLock(any(), any(), any(), any(), any());
+    }
+
+    // ── NEGATIVE: a refusal that is NOT about step-up must stay bare ───────────
+    /**
+     * A plain {@code ROLE_USER} is refused on the SAME five paths by the chain's
+     * {@code /bff/mod/**} rule, and that refusal reaches the very same access-denied handler.
+     * It must NOT be dressed up as a step-up requirement: no second factor would ever let a
+     * non-moderator ban somebody, so the dialog would be a dead end. This is the assertion
+     * that makes the handler's role-half re-check load-bearing.
+     */
+    @Test
+    void roleRefusal_onTheSameSensitivePaths_carriesNoSignal() {
+        expectNoStepUpSignal(asPlainUser().post().uri("/bff/mod/block")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue("{\"platform\":\"matrix\",\"scope\":\"user\",\"target\":\"@spam:evil.example\"}")
+                .exchange().expectStatus().isForbidden());
+        expectNoStepUpSignal(asPlainUser().post().uri("/bff/mod/ban")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue("{\"platform\":\"matrix\",\"target\":\"alice\",\"reason\":\"abuse\"}")
+                .exchange().expectStatus().isForbidden());
+        expectNoStepUpSignal(asPlainUser().method(org.springframework.http.HttpMethod.DELETE)
+                .uri("/bff/mod/domain-lock/ROLE_MATRIX_DOMAINLOCKED/alice")
+                .contentType(MediaType.APPLICATION_JSON).bodyValue("{\"reason\":\"abuse\"}")
+                .exchange().expectStatus().isForbidden());
+    }
+
+    /** A refusal on a NON-sensitive mod path carries no signal either — the signal is scoped
+     *  to the five shapes that actually carry the conjunct. */
+    @Test
+    void refusalOnANonSensitivePath_carriesNoSignal() {
+        expectNoStepUpSignal(asPlainUser().get().uri("/bff/mod/audit")
+                .exchange().expectStatus().isForbidden());
+        expectNoStepUpSignal(asPlainUser().get().uri("/bff/mod/moderation")
+                .exchange().expectStatus().isForbidden());
+    }
+
+    /** An UNAUTHENTICATED caller gets 401, never a step-up offer: mod-ui deliberately does
+     *  NOT recognise 401, because a challenge against a dead session cannot succeed. */
+    @Test
+    void unauthenticated_isNot403AndCarriesNoSignal() {
+        expectNoStepUpSignal(web.post().uri("/bff/mod/block")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue("{\"platform\":\"matrix\",\"scope\":\"user\",\"target\":\"@spam:evil.example\"}")
+                .exchange().expectStatus().isUnauthorized());
     }
 
     // ── ALLOW: the same caller WITH the marker keeps the normal contract ───────
