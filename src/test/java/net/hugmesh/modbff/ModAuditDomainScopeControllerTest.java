@@ -15,7 +15,6 @@ import net.hugmesh.modbff.audit.ModAction;
 import net.hugmesh.modbff.audit.ModActionRepository;
 import net.hugmesh.modbff.config.SecurityConfig;
 import net.hugmesh.modbff.external.MastodonAdminClient;
-import net.hugmesh.modbff.external.MatrixAdminClient;
 import net.hugmesh.modbff.federation.FederationApiClient;
 import net.hugmesh.commons.security.DomainRegistry;
 import net.hugmesh.modbff.service.ModService;
@@ -64,7 +63,6 @@ class ModAuditDomainScopeControllerTest {
     }
 
     @MockitoBean FederationApiClient federation;
-    @MockitoBean MatrixAdminClient matrix;
     @MockitoBean MastodonAdminClient mastodon;
     @MockitoBean ModActionRepository audit;
     @MockitoBean ModService mod;

@@ -19,7 +19,6 @@ import net.hugmesh.modbff.config.SecurityConfig;
 import net.hugmesh.commons.security.DomainRegistry;
 import net.hugmesh.modbff.external.BlockOutcome;
 import net.hugmesh.modbff.external.MastodonAdminClient;
-import net.hugmesh.modbff.external.MatrixAdminClient;
 import net.hugmesh.modbff.federation.FederationApiClient;
 import net.hugmesh.modbff.security.Roles;
 import net.hugmesh.modbff.service.ModService;
@@ -74,7 +73,6 @@ class ModStepUpGateControllerTest {
     }
 
     @MockitoBean FederationApiClient federation;
-    @MockitoBean MatrixAdminClient matrix;
     @MockitoBean MastodonAdminClient mastodon;
     @MockitoBean ModActionRepository audit;
     @MockitoBean ModService mod;
