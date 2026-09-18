@@ -31,7 +31,6 @@ import net.hugmesh.modbff.audit.ModAction;
 import net.hugmesh.modbff.audit.ModActionRepository;
 import net.hugmesh.modbff.audit.ModActionType;
 import net.hugmesh.modbff.external.MastodonAdminClient;
-import net.hugmesh.modbff.external.MatrixAdminClient;
 import net.hugmesh.modbff.federation.FederationApiClient;
 import net.hugmesh.modbff.federation.SubmitModerationRequest;
 import net.hugmesh.modbff.security.ModStepUpGate;
@@ -108,15 +107,13 @@ public class ModController {
             + "same request unchanged.";
 
     private final FederationApiClient federation;
-    private final MatrixAdminClient matrix;
     private final MastodonAdminClient mastodon;
     private final ModActionRepository audit;
     private final ModService mod;
 
-    public ModController(FederationApiClient federation, MatrixAdminClient matrix,
+    public ModController(FederationApiClient federation,
                          MastodonAdminClient mastodon, ModActionRepository audit, ModService mod) {
         this.federation = federation;
-        this.matrix = matrix;
         this.mastodon = mastodon;
         this.audit = audit;
         this.mod = mod;
