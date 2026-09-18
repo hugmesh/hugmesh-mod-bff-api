@@ -22,6 +22,23 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 final class SessionExchangeCache {
 
+    /**
+     * Shipped default for {@code app.bff-exchange.cache-ttl-ms}: {@code 0}, i.e. the
+     * positive-swap cache is OFF and every exchange call re-consults admin-bff's exchange
+     * gate (zero suspension-bypass window). Set 2026-09-18 by operator decision 60
+     * (hugmesh-mod-bff-api#15, "extend" — mirrors hugmesh-gateway PR #30's decision 7
+     * posture onto this BFF's own mirrored cache); the shipped default was previously
+     * {@code 5000}.
+     *
+     * <p>This constant is a PIN, not an operative default: no production code reads it —
+     * the two places the number actually takes effect are the {@code @Value} fallback on
+     * {@link SessionExchangeConfig#sessionExchangeCache} and the wired {@code
+     * application.yml} default. All three are held equal by {@code
+     * SessionExchangeCacheTtlDefaultTest}, which goes red if ANY of them drifts back to
+     * {@code 5000} (or to any positive value) on its own.
+     */
+    static final long DEFAULT_CACHE_TTL_MS = 0L;
+
     private final long ttlMillis;
     private final int maxSize;
     private final boolean enabled;

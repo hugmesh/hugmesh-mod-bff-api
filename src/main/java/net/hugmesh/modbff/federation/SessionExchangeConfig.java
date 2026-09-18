@@ -42,6 +42,15 @@ import java.time.Duration;
  * the IDENTICAL {@code InternalTokenWebFilter} guard as {@code /session/introspect}
  * (already called on that same WebClient by {@code AdminBffSessionIntrospectClient}), so
  * this needs no new wiring beyond a second thin client on top of the same bean.
+ *
+ * <h3>Positive-swap cache TTL default — 0 (operator decision 60, 2026-09-18)</h3>
+ * {@code app.bff-exchange.cache-ttl-ms} defaults to {@link
+ * SessionExchangeCache#DEFAULT_CACHE_TTL_MS} = {@code 0}: the cache is OFF, every exchange
+ * call re-consults admin-bff's exchange gate. This mirrors hugmesh-gateway PR #30's
+ * decision-7 posture for {@code BffJwtExchangeWebFilter} onto this BFF's own mirrored
+ * cache — see {@link SessionExchangeCache} and {@link SessionExchangeService}'s class
+ * javadocs for why the TTL is the suspension-bypass window. The default was previously
+ * {@code 5000}.
  */
 @Configuration(proxyBeanMethods = false)
 @ConditionalOnProperty(name = "app.bff-exchange.enabled", havingValue = "true")
@@ -54,7 +63,7 @@ public class SessionExchangeConfig {
 
     @Bean
     SessionExchangeCache sessionExchangeCache(
-            @Value("${app.bff-exchange.cache-ttl-ms:5000}") long cacheTtlMillis,
+            @Value("${app.bff-exchange.cache-ttl-ms:0}") long cacheTtlMillis,
             @Value("${app.bff-exchange.cache-max-size:10000}") int cacheMaxSize) {
         return new SessionExchangeCache(cacheTtlMillis, cacheMaxSize);
     }
