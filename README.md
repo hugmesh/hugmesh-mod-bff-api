@@ -444,6 +444,61 @@ forged `permissions:["MFA_SATISFIED"]`, so the marker cannot be self-asserted. A
 call is a clean 403 raised **before** `ModService` runs — no external effect, no audit
 row.
 
+#### What a step-up denial looks like on the wire (#16)
+
+A step-up refusal used to be **indistinguishable** from any other 403: the conjunct
+denies through Spring Security, whose default handler writes a bare status with no body
+and no header, so hugmesh-mod-ui's whole step-up dialog was correct, tested and
+**unreachable**. It now carries the platform signal — the same contract admin-bff's
+`web/StepUpRequiredException` emits:
+
+| | |
+| --- | --- |
+| **Status** | `403`, unchanged. Deliberately **not** 428 — every existing client branches on 403. |
+| **Header** | `X-Step-Up-Required: X-Mod-StepUp` — the structured leg. |
+| **Body** | `{"error":"<verb> requires step-up re-authentication (present X-Mod-StepUp)"}` — the literal phrase `requires step-up` is the legacy leg an older client greps for. |
+
+`X-Mod-StepUp` is a **flavour name, not a request header this service reads**: this gate
+has no token leg at all (`ModStepUpGate.satisfied()` is a marker-authority check and
+nothing else), so the client's follow-up is *complete a challenge, then retry the same
+request unchanged*. It is advertised so the flavour is observable and so a future token
+leg needs no client change.
+
+**Every other refusal stays byte-identical** - status, every header and the body -
+and that is measured, not asserted in prose. `ModStepUpAccessDeniedHandler` is a
+pass-through to the handler Spring Security installs on *this* chain unless all
+four of: the gate is armed, the request is one of the five shapes above, the caller
+passed the **role** half, and the caller does not satisfy the gate. That delegate is
+`BearerTokenServerAccessDeniedHandler`, **not** the bare status handler: installing an
+explicit `accessDeniedHandler` makes `ServerHttpSecurity` discard its
+`defaultAccessDeniedHandlers` wholesale, and for a chain that configures
+`oauth2ResourceServer` (both of ours do) those defaults resolve to the bearer one. A
+pass-through to `HttpStatusServerAccessDeniedHandler` would have dropped
+`WWW-Authenticate: Bearer` from, and added a `text/plain` `Access Denied` body to,
+**every** non-step-up 403 this service emits - measured on 2026-09-17, and now pinned
+by `StepUpAccessDeniedWiringTest`, which extracts Spring's own handler from a stock
+chain at runtime and compares the two responses field by field. (The step-up response
+itself is the one deliberate exception: it is a new shape by design and carries no
+`WWW-Authenticate`, since re-presenting the same bearer is exactly what will not
+satisfy it.) The role-half
+re-check is the load-bearing one — a plain `ROLE_USER` is refused on these same paths by
+the chain rule, and dressing that up as a step-up requirement would offer an MFA
+challenge that could never let them through. Pinned by `ModStepUpGateControllerTest`
+(signal present on all five, absent on a role 403, on a non-sensitive 403 and on a 401),
+`ModStepUpSignalDarkTest` (nothing signals while the flag is dark),
+`ModStepUpConjunctInventoryTest`, which derives the gated mappings from the
+`@PreAuthorize` annotations and from `ModStepUpGate.SENSITIVE_WRITES` reflectively and
+fails if the two lists ever differ, `ModStepUpSignalDevChainTest` (the dev/test
+profile's chain, which no other slice in this repo exercises) and
+`StepUpAccessDeniedWiringTest` (both chains carry the handler; the pass-through is
+byte-identical to Spring's own).
+
+No `@PreAuthorize` expression changed: the conjunct still decides **what** is denied,
+and this only supplies **what the denial says**. The header is documented on the 403 of
+all five operations in the committed `openapi/openapi.json`. **No flag is flipped** —
+with `enforce-sensitive-writes` dark (the shipped default) nothing is denied and nothing
+is signalled.
+
 Two independent flags, both `false` by default (`ModStepUpGate` / `SecurityConfig`):
 
 | Property | Env | Governs |
@@ -658,7 +713,16 @@ initContainer) and the generator-owned deployment requirement.
     plain MXID (whitespace, newline) is refused before any HTTP so it can never widen
     the text command. The deployment side (mounting `tuwunel-admin` into this pod as
     `MATRIX_ADMIN_TOKEN`, flipping `MATRIX_ADMIN_ENABLED`) lives in the generator and
-    has not been flipped anywhere.
+    has not been flipped anywhere — measured 2026-09-17, `MATRIX_ADMIN_ENABLED` does
+    not occur in any hugmesh-generator manifest, so no deploy-time env supplies it
+    either and the only way to arm it is a deliberate per-environment variable.
+    **The block is one-way and this service has no path that reverses it:**
+    `MatrixAdminClient` is reached only from `ModService.block(...)`, while `lift` and
+    `domainUnlock` clear Casdoor / admin-bff desired-state and never touch a
+    homeserver client at all. That asymmetry is pinned by `MatrixBlockIsOneWayTest`,
+    so it is a guard rather than only this paragraph; how a lift *should* be modelled
+    when the forward verb is irreversible is an operator decision, not an
+    implementation gap (proposed on hugmesh-generator#347).
   - **akkoma (Mastodon) — ✅ WIRED, dark by default.** The request shapes **are**
     pinned in code (`PATCH /api/v1/pleroma/admin/users/deactivate` with
     `{"nicknames":[localpart]}` for block-user, `DELETE
@@ -676,6 +740,21 @@ initContainer) and the generator-owned deployment requirement.
   and **always** recorded in `mod_action`, so every block is fully auditable. The
   `external.{matrix,mastodon}.enabled` flags default `false`, so a homeserver-less
   cluster stays inert.
+
+  **That "defaults false" is a tested contract, on three axes.**
+  `ExternalAdminDefaultsTest` resolves the shipped configuration and asserts the flag
+  is `false` (and both clients `STUBBED`) (1) from the `@Value` fallbacks alone,
+  (2) from the packaged `application.yml` with **no** profile - what a cluster pod
+  resolves, since `specs/cluster/manifests/mod-bff-api/deployment.yaml` sets no
+  `SPRING_PROFILES_ACTIVE` - and (3) under **every profile the jar can activate**,
+  discovered at runtime from the build output: one per packaged
+  `application-<profile>.*`, one per `spring.config.activate.on-profile` document
+  inside any packaged file, plus the measured deployed names (`casdoor`, which
+  `tests/stack/compose.local.yaml` sets for this service, `dev`, `test`). Axis (3)
+  exists because a packaged `application-casdoor.yml` containing
+  `external.matrix.enabled: true` used to leave the whole class green while
+  `MatrixAdminClient` stopped being stubbed - a text-level or profile-less guard
+  cannot see it.
 - **No auto-apply of an approved decision.** An approved moderation request in
   federation-api authorises a kill-switch/removal action; wiring that
   auto-application is intentionally left as a separate, auditable step (it lives in
@@ -825,7 +904,9 @@ src/main/java/net/hugmesh/modbff
   ModController.java                /bff/mod/** reactive endpoints
   service/ModService.java           ban/lift/domain-lock orchestration + defence-in-depth guards (self-ban, privileged-target, same-tenant)
   security/Roles.java               authority helpers — domainOf / domainApplies (fail-closed tenant scope) + isMfaSatisfied
-  security/ModStepUpGate.java       step-up MFA predicate for the sensitive write-effects (@PreAuthorize conjunct, ships dark behind app.mfa.enforce-sensitive-writes)
+  security/ModStepUpGate.java       step-up MFA predicate for the sensitive write-effects (@PreAuthorize conjunct, ships dark behind app.mfa.enforce-sensitive-writes) + the five gated request shapes
+  security/ModStepUpAccessDeniedHandler.java  makes a step-up 403 recognisable (X-Step-Up-Required + the legacy phrase); pass-through to the Spring default for every other denial
+  web/StepUpRequiredException.java  the ONE place a step-up refusal is minted — 403 + flavour + legacy phrase, mirroring admin-bff's platform contract
   config/SecurityConfig.java        Casdoor JWT resource server + profile-split spec gating + SUPERADMIN floor (delegates to commons CasdoorAuthorities)
   config/CommonsSecurityConfig.java @Import of the shared hugmesh-commons security/tenancy wiring (CasdoorAuthorities / DomainRegistry / TenancyResourceServerConfig)
   config/OpenApiConfig.java         springdoc OpenAPI metadata
