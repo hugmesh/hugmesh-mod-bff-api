@@ -20,7 +20,6 @@ import net.hugmesh.modbff.config.SecurityConfig;
 import net.hugmesh.commons.security.DomainRegistry;
 import net.hugmesh.modbff.external.BlockOutcome;
 import net.hugmesh.modbff.external.MastodonAdminClient;
-import net.hugmesh.modbff.external.MatrixAdminClient;
 import net.hugmesh.modbff.federation.FederationApiClient;
 import net.hugmesh.modbff.federation.ModerationRequestDto;
 import net.hugmesh.modbff.federation.SystemFindingDto;
@@ -68,7 +67,6 @@ class ModControllerTest {
     }
 
     @MockitoBean FederationApiClient federation;
-    @MockitoBean MatrixAdminClient matrix;
     @MockitoBean MastodonAdminClient mastodon;
     @MockitoBean ModActionRepository audit;
     @MockitoBean ModService mod;

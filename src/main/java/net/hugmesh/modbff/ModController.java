@@ -1,7 +1,9 @@
 package net.hugmesh.modbff;
 
 import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.headers.Header;
 import io.swagger.v3.oas.annotations.media.Content;
+import io.swagger.v3.oas.annotations.media.Schema;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.responses.ApiResponses;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -29,9 +31,9 @@ import net.hugmesh.modbff.audit.ModAction;
 import net.hugmesh.modbff.audit.ModActionRepository;
 import net.hugmesh.modbff.audit.ModActionType;
 import net.hugmesh.modbff.external.MastodonAdminClient;
-import net.hugmesh.modbff.external.MatrixAdminClient;
 import net.hugmesh.modbff.federation.FederationApiClient;
 import net.hugmesh.modbff.federation.SubmitModerationRequest;
+import net.hugmesh.modbff.security.ModStepUpGate;
 import net.hugmesh.modbff.security.Roles;
 import net.hugmesh.modbff.service.ModService;
 import net.hugmesh.modbff.web.BanRequest;
@@ -86,16 +88,32 @@ public class ModController {
 
     private static final Logger log = LoggerFactory.getLogger(ModController.class);
 
+    /**
+     * Documented on the 403 of each of the five step-up-gated operations. Spelled as a
+     * literal rather than referencing {@code StepUpRequiredException.SIGNAL_HEADER} because an
+     * annotation attribute needs a compile-time constant and the two live in different
+     * packages; {@code StepUpSignalContractTest} asserts they are the same string, so they
+     * cannot drift.
+     */
+    public static final String STEP_UP_SIGNAL_HEADER = "X-Step-Up-Required";
+
+    /** The one sentence a client needs: this 403 is the step-up leg, not the role leg. */
+    public static final String STEP_UP_SIGNAL_DESCRIPTION =
+            "Present ONLY when this 403 is a step-up refusal (app.mfa.enforce-sensitive-writes "
+            + "armed and the caller carries no fresh MFA marker) — absent on an ordinary role / "
+            + "privileged-target / cross-tenant 403. Its value names this BFF's step-up flavour; "
+            + "the body additionally carries the literal phrase \"requires step-up\". There is no "
+            + "token leg here: complete a challenge so the session is stamped, then retry the "
+            + "same request unchanged.";
+
     private final FederationApiClient federation;
-    private final MatrixAdminClient matrix;
     private final MastodonAdminClient mastodon;
     private final ModActionRepository audit;
     private final ModService mod;
 
-    public ModController(FederationApiClient federation, MatrixAdminClient matrix,
+    public ModController(FederationApiClient federation,
                          MastodonAdminClient mastodon, ModActionRepository audit, ModService mod) {
         this.federation = federation;
-        this.matrix = matrix;
         this.mastodon = mastodon;
         this.audit = audit;
         this.mod = mod;
@@ -194,7 +212,8 @@ public class ModController {
             @ApiResponse(responseCode = "202", description = "Pending-reconcile — homeserver call STUBBED/degraded; action audited"),
             @ApiResponse(responseCode = "400", description = "Validation failed — invalid platform/scope/target", content = @Content),
             @ApiResponse(responseCode = "401", description = "Unauthenticated", content = @Content),
-            @ApiResponse(responseCode = "403", description = "Caller lacks ROLE_MOD or ROLE_ADMIN, step-up MFA is required but not satisfied, or target is privileged / cross-tenant", content = @Content),
+            @ApiResponse(responseCode = "403", description = "Caller lacks ROLE_MOD or ROLE_ADMIN, step-up MFA is required but not satisfied, or target is privileged / cross-tenant", content = @Content,
+                    headers = @Header(name = STEP_UP_SIGNAL_HEADER, description = STEP_UP_SIGNAL_DESCRIPTION, schema = @Schema(type = "string", example = ModStepUpGate.STEP_UP_HEADER))),
             @ApiResponse(responseCode = "500", description = "Unexpected server error", content = @Content)
     })
     @PreAuthorize("hasAnyRole('MOD','ADMIN') and @modStepUpGate.satisfied(authentication)")
@@ -236,7 +255,8 @@ public class ModController {
             @ApiResponse(responseCode = "202", description = "Pending-reconcile — desired-state written; reconcile loop applies the effect"),
             @ApiResponse(responseCode = "400", description = "Validation failed — missing/invalid field", content = @Content),
             @ApiResponse(responseCode = "401", description = "Unauthenticated", content = @Content),
-            @ApiResponse(responseCode = "403", description = "Step-up MFA not satisfied, self-ban, privileged target, or cross-tenant attempt denied", content = @Content),
+            @ApiResponse(responseCode = "403", description = "Step-up MFA not satisfied, self-ban, privileged target, or cross-tenant attempt denied", content = @Content,
+                    headers = @Header(name = STEP_UP_SIGNAL_HEADER, description = STEP_UP_SIGNAL_DESCRIPTION, schema = @Schema(type = "string", example = ModStepUpGate.STEP_UP_HEADER))),
             @ApiResponse(responseCode = "500", description = "Unexpected server error", content = @Content)
     })
     @PreAuthorize("hasAnyRole('MOD','ADMIN') and @modStepUpGate.satisfied(authentication)")
@@ -258,7 +278,8 @@ public class ModController {
             @ApiResponse(responseCode = "202", description = "Pending-reconcile — desired-state cleared; reconcile loop lifts the effect"),
             @ApiResponse(responseCode = "400", description = "Validation failed — missing/invalid field", content = @Content),
             @ApiResponse(responseCode = "401", description = "Unauthenticated", content = @Content),
-            @ApiResponse(responseCode = "403", description = "Step-up MFA not satisfied, self-lift, or cross-tenant attempt denied", content = @Content),
+            @ApiResponse(responseCode = "403", description = "Step-up MFA not satisfied, self-lift, or cross-tenant attempt denied", content = @Content,
+                    headers = @Header(name = STEP_UP_SIGNAL_HEADER, description = STEP_UP_SIGNAL_DESCRIPTION, schema = @Schema(type = "string", example = ModStepUpGate.STEP_UP_HEADER))),
             @ApiResponse(responseCode = "500", description = "Unexpected server error", content = @Content)
     })
     @PreAuthorize("hasAnyRole('MOD','ADMIN') and @modStepUpGate.satisfied(authentication)")
@@ -292,7 +313,8 @@ public class ModController {
             @ApiResponse(responseCode = "202", description = "Pending-reconcile — domain-lock desired-state written"),
             @ApiResponse(responseCode = "400", description = "Invalid role path variable", content = @Content),
             @ApiResponse(responseCode = "401", description = "Unauthenticated", content = @Content),
-            @ApiResponse(responseCode = "403", description = "Step-up MFA not satisfied, self-lock, privileged target, or cross-tenant attempt denied", content = @Content),
+            @ApiResponse(responseCode = "403", description = "Step-up MFA not satisfied, self-lock, privileged target, or cross-tenant attempt denied", content = @Content,
+                    headers = @Header(name = STEP_UP_SIGNAL_HEADER, description = STEP_UP_SIGNAL_DESCRIPTION, schema = @Schema(type = "string", example = ModStepUpGate.STEP_UP_HEADER))),
             @ApiResponse(responseCode = "500", description = "Unexpected server error", content = @Content)
     })
     @PreAuthorize("hasAnyRole('MOD','ADMIN') and @modStepUpGate.satisfied(authentication)")
@@ -323,7 +345,8 @@ public class ModController {
             @ApiResponse(responseCode = "202", description = "Pending-reconcile — domain-lock desired-state cleared"),
             @ApiResponse(responseCode = "400", description = "Invalid role path variable", content = @Content),
             @ApiResponse(responseCode = "401", description = "Unauthenticated", content = @Content),
-            @ApiResponse(responseCode = "403", description = "Step-up MFA not satisfied, self-unlock, or cross-tenant attempt denied", content = @Content),
+            @ApiResponse(responseCode = "403", description = "Step-up MFA not satisfied, self-unlock, or cross-tenant attempt denied", content = @Content,
+                    headers = @Header(name = STEP_UP_SIGNAL_HEADER, description = STEP_UP_SIGNAL_DESCRIPTION, schema = @Schema(type = "string", example = ModStepUpGate.STEP_UP_HEADER))),
             @ApiResponse(responseCode = "500", description = "Unexpected server error", content = @Content)
     })
     @PreAuthorize("hasAnyRole('MOD','ADMIN') and @modStepUpGate.satisfied(authentication)")

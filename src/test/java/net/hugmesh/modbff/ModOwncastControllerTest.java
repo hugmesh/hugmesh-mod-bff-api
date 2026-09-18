@@ -19,7 +19,6 @@ import net.hugmesh.modbff.audit.ModActionRepository;
 import net.hugmesh.modbff.config.SecurityConfig;
 import net.hugmesh.modbff.external.BlockOutcome;
 import net.hugmesh.modbff.external.MastodonAdminClient;
-import net.hugmesh.modbff.external.MatrixAdminClient;
 import net.hugmesh.modbff.federation.FederationApiClient;
 import net.hugmesh.modbff.service.ModService;
 import net.hugmesh.modbff.web.ApiExceptionHandler;
@@ -63,7 +62,6 @@ class ModOwncastControllerTest {
     }
 
     @MockitoBean FederationApiClient federation;
-    @MockitoBean MatrixAdminClient matrix;
     @MockitoBean MastodonAdminClient mastodon;
     @MockitoBean ModActionRepository audit;
     @MockitoBean ModService mod;

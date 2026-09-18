@@ -48,7 +48,11 @@ abstract class Wave2SecuritySliceSupport {
             Object... controllers) {
 
         SecurityConfig config = new SecurityConfig(registry, tenantResolver, false, 600000L);
-        SecurityWebFilterChain chain = config.filterChain(ServerHttpSecurity.http());
+        // The chain now takes its accessDeniedHandler as an argument; build it exactly as the
+        // @Bean method does, with the step-up gate on its SHIPPED-DARK default (false), so
+        // these slices keep driving the production shape and the handler stays a pass-through.
+        SecurityWebFilterChain chain = config.filterChain(ServerHttpSecurity.http(),
+                config.modStepUpAccessDeniedHandler(config.modStepUpGate(false), config.roleHierarchy()));
         WebFilterChainProxy securityFilter = new WebFilterChainProxy(chain);
 
         return WebTestClient.bindToController(controllers)

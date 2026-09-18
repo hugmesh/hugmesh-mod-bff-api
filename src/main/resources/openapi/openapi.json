@@ -72,7 +72,17 @@
             "description" : "Unauthenticated"
           },
           "403" : {
-            "description" : "Step-up MFA not satisfied, self-lock, privileged target, or cross-tenant attempt denied"
+            "description" : "Step-up MFA not satisfied, self-lock, privileged target, or cross-tenant attempt denied",
+            "headers" : {
+              "X-Step-Up-Required" : {
+                "description" : "Present ONLY when this 403 is a step-up refusal (app.mfa.enforce-sensitive-writes armed and the caller carries no fresh MFA marker) — absent on an ordinary role / privileged-target / cross-tenant 403. Its value names this BFF's step-up flavour; the body additionally carries the literal phrase \"requires step-up\". There is no token leg here: complete a challenge so the session is stamped, then retry the same request unchanged.",
+                "style" : "simple",
+                "schema" : {
+                  "type" : "string",
+                  "example" : "X-Mod-StepUp"
+                }
+              }
+            }
           },
           "500" : {
             "description" : "Unexpected server error"
@@ -131,7 +141,17 @@
             "description" : "Unauthenticated"
           },
           "403" : {
-            "description" : "Step-up MFA not satisfied, self-unlock, or cross-tenant attempt denied"
+            "description" : "Step-up MFA not satisfied, self-unlock, or cross-tenant attempt denied",
+            "headers" : {
+              "X-Step-Up-Required" : {
+                "description" : "Present ONLY when this 403 is a step-up refusal (app.mfa.enforce-sensitive-writes armed and the caller carries no fresh MFA marker) — absent on an ordinary role / privileged-target / cross-tenant 403. Its value names this BFF's step-up flavour; the body additionally carries the literal phrase \"requires step-up\". There is no token leg here: complete a challenge so the session is stamped, then retry the same request unchanged.",
+                "style" : "simple",
+                "schema" : {
+                  "type" : "string",
+                  "example" : "X-Mod-StepUp"
+                }
+              }
+            }
           },
           "500" : {
             "description" : "Unexpected server error"
@@ -507,7 +527,17 @@
             "description" : "Unauthenticated"
           },
           "403" : {
-            "description" : "Caller lacks ROLE_MOD or ROLE_ADMIN, step-up MFA is required but not satisfied, or target is privileged / cross-tenant"
+            "description" : "Caller lacks ROLE_MOD or ROLE_ADMIN, step-up MFA is required but not satisfied, or target is privileged / cross-tenant",
+            "headers" : {
+              "X-Step-Up-Required" : {
+                "description" : "Present ONLY when this 403 is a step-up refusal (app.mfa.enforce-sensitive-writes armed and the caller carries no fresh MFA marker) — absent on an ordinary role / privileged-target / cross-tenant 403. Its value names this BFF's step-up flavour; the body additionally carries the literal phrase \"requires step-up\". There is no token leg here: complete a challenge so the session is stamped, then retry the same request unchanged.",
+                "style" : "simple",
+                "schema" : {
+                  "type" : "string",
+                  "example" : "X-Mod-StepUp"
+                }
+              }
+            }
           },
           "500" : {
             "description" : "Unexpected server error"
@@ -551,7 +581,17 @@
             "description" : "Unauthenticated"
           },
           "403" : {
-            "description" : "Step-up MFA not satisfied, self-ban, privileged target, or cross-tenant attempt denied"
+            "description" : "Step-up MFA not satisfied, self-ban, privileged target, or cross-tenant attempt denied",
+            "headers" : {
+              "X-Step-Up-Required" : {
+                "description" : "Present ONLY when this 403 is a step-up refusal (app.mfa.enforce-sensitive-writes armed and the caller carries no fresh MFA marker) — absent on an ordinary role / privileged-target / cross-tenant 403. Its value names this BFF's step-up flavour; the body additionally carries the literal phrase \"requires step-up\". There is no token leg here: complete a challenge so the session is stamped, then retry the same request unchanged.",
+                "style" : "simple",
+                "schema" : {
+                  "type" : "string",
+                  "example" : "X-Mod-StepUp"
+                }
+              }
+            }
           },
           "500" : {
             "description" : "Unexpected server error"
@@ -593,7 +633,17 @@
             "description" : "Unauthenticated"
           },
           "403" : {
-            "description" : "Step-up MFA not satisfied, self-lift, or cross-tenant attempt denied"
+            "description" : "Step-up MFA not satisfied, self-lift, or cross-tenant attempt denied",
+            "headers" : {
+              "X-Step-Up-Required" : {
+                "description" : "Present ONLY when this 403 is a step-up refusal (app.mfa.enforce-sensitive-writes armed and the caller carries no fresh MFA marker) — absent on an ordinary role / privileged-target / cross-tenant 403. Its value names this BFF's step-up flavour; the body additionally carries the literal phrase \"requires step-up\". There is no token leg here: complete a challenge so the session is stamped, then retry the same request unchanged.",
+                "style" : "simple",
+                "schema" : {
+                  "type" : "string",
+                  "example" : "X-Mod-StepUp"
+                }
+              }
+            }
           },
           "500" : {
             "description" : "Unexpected server error"

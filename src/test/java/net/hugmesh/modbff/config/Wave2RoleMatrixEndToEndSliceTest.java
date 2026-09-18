@@ -15,7 +15,6 @@ import net.hugmesh.modbff.ModController;
 import net.hugmesh.modbff.audit.ModAction;
 import net.hugmesh.modbff.audit.ModActionRepository;
 import net.hugmesh.modbff.external.MastodonAdminClient;
-import net.hugmesh.modbff.external.MatrixAdminClient;
 import net.hugmesh.modbff.federation.FederationApiClient;
 import net.hugmesh.modbff.federation.FederationManifestDto;
 import net.hugmesh.commons.security.DomainRegistry;
@@ -86,12 +85,11 @@ class Wave2RoleMatrixEndToEndSliceTest extends Wave2SecuritySliceSupport {
         // Leaf collaborators are mocked; the controller + (for the ban guard) the service
         // run for real. The READ endpoints (audit/modules/list) need no service.
         federation = mock(FederationApiClient.class);
-        MatrixAdminClient matrix = mock(MatrixAdminClient.class);
         MastodonAdminClient mastodon = mock(MastodonAdminClient.class);
         audit = mock(ModActionRepository.class);
         ModService modService = mock(ModService.class);
 
-        ModController controller = new ModController(federation, matrix, mastodon, audit, modService);
+        ModController controller = new ModController(federation, mastodon, audit, modService);
         client = sliceClient(registry, provider(resolver), controller);
     }
 

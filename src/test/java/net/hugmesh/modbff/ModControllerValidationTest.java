@@ -19,7 +19,6 @@ import net.hugmesh.modbff.config.SecurityConfig;
 import net.hugmesh.commons.security.DomainRegistry;
 import net.hugmesh.modbff.external.BlockOutcome;
 import net.hugmesh.modbff.external.MastodonAdminClient;
-import net.hugmesh.modbff.external.MatrixAdminClient;
 import net.hugmesh.modbff.federation.FederationApiClient;
 import net.hugmesh.modbff.service.ModService;
 import net.hugmesh.modbff.web.ApiExceptionHandler;
@@ -59,7 +58,6 @@ class ModControllerValidationTest {
     }
 
     @MockitoBean FederationApiClient federation;
-    @MockitoBean MatrixAdminClient matrix;
     @MockitoBean MastodonAdminClient mastodon;
     @MockitoBean ModActionRepository audit;
     @MockitoBean ModService mod;
@@ -86,7 +84,7 @@ class ModControllerValidationTest {
                 .expectBody()
                 .jsonPath("$.error").isEqualTo("validation failed")
                 .jsonPath("$.fields.platform").exists();
-        verify(matrix, never()).blockUser(anyString());
+        verify(mod, never()).block(anyString(), anyString(), anyString(), anyString(), any());
         verify(audit, never()).record(anyString(), anyString(), anyString(), anyString(), any(), anyString());
     }
 
