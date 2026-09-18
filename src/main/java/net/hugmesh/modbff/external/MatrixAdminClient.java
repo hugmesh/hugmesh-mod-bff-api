@@ -19,7 +19,18 @@ import reactor.core.publisher.Mono;
  * :8008} (overridable via {@code external.matrix.base-url}; default grounded in
  * hugmesh-generator specs/cluster/manifests/tuwunel/tuwunel.yaml).
  *
- * <h3>Admin-room command transport — WIRED for block-user, dark by default</h3>
+ * <h3>Reachability, since decision 51 (2026-09-18)</h3>
+ * <p>{@link #blockUser} (the {@code !admin users deactivate} transport below) is no
+ * longer called by {@code ModService}'s MOD-facing block surface: a MOD-initiated
+ * Matrix USER block is now applied as a reversible {@code domain_lock} write instead
+ * (see {@code ModService#matrixUserBlock}), because deactivate is irreversible and
+ * tuwunel has no {@code activate}. This reverses decision 5 ("ANSWERED 2026-09-10:
+ * deactivate"). The method and the transport below are UNCHANGED and kept for a future
+ * ADMIN-only path with its own explicit confirmation — none exists yet, tracked on
+ * hugmesh-mod-bff-api#23 — so today {@link #blockUser} is unreachable from anywhere in
+ * this service. Do not arm {@code MATRIX_ADMIN_ENABLED} before that path exists.
+ *
+ * <h3>Admin-room command transport — dark by default, dormant on the MOD path</h3>
  * <p>tuwunel is a Conduit-family server and, per the generator manifest + upstream
  * source, has <b>NO Synapse-style {@code /_synapse/admin} REST API and no HTTP admin
  * surface at all</b>. Server-admin verbs are {@code !admin ...} text commands posted
@@ -52,11 +63,18 @@ import reactor.core.publisher.Mono;
  *       the posted event id) is not yet read back, so an outcome never upgrades from
  *       {@code posted} to {@code ok}. Its success/failure text grammar must be pinned
  *       against the deployed tuwunel before any code claims {@code ok}.</li>
- *   <li><b>block-instance.</b> tuwunel has NO runtime per-server federation-block
- *       verb (only per-room {@code !admin federation disable-room}); whole-server
- *       blocking is static {@code forbidden_remote_server_names} config, so the
- *       instance leg returns {@code degraded:no-tuwunel-verb} when enabled — the
- *       generator egress NetworkPolicy is the authoritative backstop.</li>
+ *   <li><b>block-instance (operator decision 50, 2026-09-18, answer B).</b> tuwunel
+ *       has NO runtime per-server federation-block verb (only per-room
+ *       {@code !admin federation disable-room}); whole-server blocking is a STATIC
+ *       {@code forbidden_remote_server_names} config edit + a GitOps reconcile + a
+ *       homeserver restart — not something an HTTP call from here can do. So the
+ *       instance leg returns {@code requested:no-tuwunel-verb} when enabled — a
+ *       durably-recorded REQUEST (the {@code mod_action} row), never implying the
+ *       block was applied. Turning that request into the config edit is a SEPARATE
+ *       admin/GitOps job, out of scope for this repo — filed as follow-up issues on
+ *       hugmesh-federation-api and hugmesh-generator, cross-linked from
+ *       hugmesh-mod-bff-api#1. The generator egress NetworkPolicy remains the
+ *       authoritative backstop in the meantime.</li>
  *   <li><b>Un-block.</b> There is no {@code !admin users activate} verb; lifting a
  *       Matrix block must be modelled out of band.</li>
  * </ul>
@@ -132,9 +150,11 @@ public class MatrixAdminClient {
     /**
      * The single external-call seam. Dark by default: {@code enabled=false} returns
      * {@link BlockOutcome#STUBBED} with NO HTTP. Enabled without an admin token degrades
-     * ({@code no-admin-token}) rather than posting unauthenticated. Enabled with a token
-     * posts the real admin-room command for block-user; block-instance has no tuwunel
-     * verb and degrades ({@code no-tuwunel-verb}).
+     * ({@code no-admin-token}) rather than posting unauthenticated. Enabled with a token,
+     * {@code block-user} is reachable only from a future admin path (see class javadoc —
+     * the MOD path no longer calls it) and posts the real admin-room command;
+     * {@code block-instance} has no tuwunel verb at all and records a REQUEST
+     * ({@code requested:no-tuwunel-verb}) rather than attempting an effect.
      */
     private Mono<BlockOutcome> doBlock(String op, String target) {
         if (!enabled) {
@@ -170,13 +190,17 @@ public class MatrixAdminClient {
     /**
      * tuwunel has no runtime whole-server federation-block verb (only static
      * {@code forbidden_remote_server_names} config and per-room disable-room), so the
-     * instance leg cannot be applied from here — degraded, never OK, no HTTP.
+     * instance leg cannot be applied from here — no HTTP is issued, and the intent is
+     * recorded as a REQUEST (never {@code degraded}: nothing failed, nothing can
+     * synchronously succeed either — operator decision 50, 2026-09-18).
      */
     private Mono<BlockOutcome> noInstanceVerb(String domain) {
-        log.warn("[matrix] block-instance for {} cannot be applied — tuwunel has no runtime per-server "
-                + "federation-block admin verb (static forbidden_remote_server_names only); the generator "
-                + "egress NetworkPolicy is the authoritative backstop (degraded:no-tuwunel-verb)", domain);
-        return Mono.just(BlockOutcome.degraded("no-tuwunel-verb"));
+        log.warn("[matrix] block-instance for {} recorded as a REQUEST, not applied — tuwunel has no "
+                + "runtime per-server federation-block admin verb (static forbidden_remote_server_names "
+                + "only); an administrator must turn this mod_action row into a config edit + GitOps "
+                + "reconcile + restart. The generator egress NetworkPolicy is the authoritative backstop "
+                + "meanwhile (requested:no-tuwunel-verb)", domain);
+        return Mono.just(BlockOutcome.requested("no-tuwunel-verb"));
     }
 
     /** Alias → room id, cached per process; empty when the directory reply carries no room id. */

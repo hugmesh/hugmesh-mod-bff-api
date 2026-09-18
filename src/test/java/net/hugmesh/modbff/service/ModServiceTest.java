@@ -560,17 +560,66 @@ class ModServiceTest {
     }
 
     // ── ALLOW (control): a same-tenant, non-privileged target → block proceeds ──
+    // Decision 51 (2026-09-18): a matrix/user block now writes a domain-lock instead of
+    // calling the (irreversible) deactivate transport — see MatrixBlockIsOneWayTest for
+    // the dedicated reversibility coverage. mastodon is unaffected (still the homeserver
+    // client), covered separately below.
     @Test
     void block_sameTenantNonPrivileged_isAllowed_andRecordsWithCallersDomain() {
         when(roles.belongsToDomain(eq("@spam:evil"), eq("brandx"))).thenReturn(Mono.just(true));
         StepVerifier.create(service.block("matrix", "user", "@spam:evil", "abuse",
                         auth("mod:x", "ROLE_MOD", "ROLE_MATRIX", "DOMAIN_brandx")))
-                .assertNext(r -> assertThat(r.outcome().result()).isEqualTo("stubbed"))
+                .assertNext(r -> assertThat(r.outcome()).isEqualTo(
+                        net.hugmesh.modbff.external.BlockOutcome.DOMAIN_LOCKED))
                 .verifyComplete();
-        verify(matrix).blockUser("@spam:evil");
+        verify(domainLocks).lock("matrix", "@spam:evil", "abuse");
+        verify(matrix, never()).blockUser(anyString());
         // BUG-B mirror: the block row is stamped with the caller's validated brand.
         verify(audit).record(eq("mod:x"), eq("matrix.block-user"), eq("matrix"),
-                eq("@spam:evil"), eq("abuse"), eq("stubbed"), eq("brandx"));
+                eq("@spam:evil"), eq("abuse"), eq("domain-locked"), eq("brandx"));
+    }
+
+    // ── ALLOW (control): mastodon still drives the homeserver client directly ──
+    @Test
+    void block_mastodonSameTenantNonPrivileged_isAllowed_andCallsTheHomeserverClient() {
+        when(roles.belongsToDomain(eq("@spam@evil"), eq("brandx"))).thenReturn(Mono.just(true));
+        StepVerifier.create(service.block("mastodon", "user", "@spam@evil", "abuse",
+                        auth("mod:x", "ROLE_MOD", "ROLE_MASTODON", "DOMAIN_brandx")))
+                .assertNext(r -> assertThat(r.outcome().result()).isEqualTo("stubbed"))
+                .verifyComplete();
+        verify(mastodon).blockUser("@spam@evil");
+        verify(domainLocks, never()).lock(anyString(), anyString(), any());
+    }
+
+    // ── Decision 51: the block body HONESTLY explains the domain-lock effect ──
+    @Test
+    void block_matrixUser_bodyNoteExplainsTheReversibleDomainLock() {
+        StepVerifier.create(service.block("matrix", "user", "alice", "evasion",
+                        auth("mod:bob", "ROLE_MOD", "ROLE_MATRIX")))
+                .assertNext(r -> {
+                    Object note = r.body().get("note");
+                    assertThat(note).asString()
+                            .contains("REVERSIBLE").contains("domain-lock")
+                            .contains("/bff/mod/domain-lock/ROLE_MATRIX_DOMAINLOCKED");
+                    assertThat(r.body().get("state")).isEqualTo("pending-reconcile");
+                })
+                .verifyComplete();
+    }
+
+    // ── Decision 50: the block body HONESTLY says "requested", never "applied" ──
+    @Test
+    void block_matrixInstance_bodyNoteExplainsTheRecordedRequest() {
+        when(matrix.blockInstance(anyString())).thenReturn(Mono.just(
+                net.hugmesh.modbff.external.BlockOutcome.requested("no-tuwunel-verb")));
+        StepVerifier.create(service.block("matrix", "instance", "evil.example", "abuse",
+                        auth("mod:bob", "ROLE_MOD", "ROLE_MATRIX")))
+                .assertNext(r -> {
+                    Object note = r.body().get("note");
+                    assertThat(note).asString()
+                            .contains("REQUEST").contains("administrator");
+                    assertThat(r.body().get("state")).isEqualTo("pending-reconcile");
+                })
+                .verifyComplete();
     }
 
     // ── ALLOW (control): brand-X mod bans a PROVEN brand-X target → write proceeds ──

@@ -260,8 +260,10 @@ public class ModService {
         // Platform-role re-check (defence in depth): throws 403 before any homeserver/audit effect.
         assertPlatformRole(platform, auth);
         // Route matrix|mastodon to the appropriate homeserver client; profile/null stays STUBBED.
+        // MATRIX + user is special-cased to matrixUserBlock (decision 51) instead of the
+        // homeserver client directly — see that method's javadoc.
         Mono<BlockOutcome> external = switch (PlatformKind.fromWire(platform)) {
-            case MATRIX   -> user ? matrix.blockUser(target)   : matrix.blockInstance(target);
+            case MATRIX   -> user ? matrixUserBlock(target, reason) : matrix.blockInstance(target);
             case MASTODON -> user ? mastodon.blockUser(target) : mastodon.blockInstance(target);
             case null, default -> Mono.just(BlockOutcome.STUBBED);
         };
@@ -270,6 +272,39 @@ public class ModService {
         return external.flatMap(outcome -> audit.record(actor, action, platform, target,
                         reason, outcome.result(), domain)
                 .map(recorded -> new BlockResult(recorded, outcome)));
+    }
+
+    /**
+     * Decision 51 (operator, 2026-09-18, answer <b>B</b> — AGAINST the "leave deactivate"
+     * recommendation): a MOD-initiated Matrix USER block must be REVERSIBLE end to end.
+     * tuwunel's only user-block verb is the one-way {@code !admin users deactivate} (no
+     * {@code activate} exists), so this no longer drives
+     * {@link MatrixAdminClient#blockUser}. Instead it writes the SAME {@code domain_lock}
+     * desired-state {@link #domainLock} does (force local-only / no-federation on the
+     * {@code matrix} platform) — which {@code DELETE
+     * /bff/mod/domain-lock/ROLE_MATRIX_DOMAINLOCKED/{user}} ({@link #domainUnlock}, via
+     * {@link AdminDomainLockClient#unlock}) already reverses. <b>This REVERSES decision
+     * 5</b> ("ANSWERED 2026-09-10: deactivate", hugmesh-mod-bff-api#1) for the MOD path
+     * specifically.
+     *
+     * <p>The deactivate transport ({@link MatrixAdminClient#blockUser},
+     * {@code DEACTIVATE_COMMAND}) is UNCHANGED and stays in the codebase for a future
+     * ADMIN-only path with its own explicit confirmation — none exists yet (see
+     * hugmesh-mod-bff-api#23) — so it is no longer reachable from anywhere in this
+     * service. {@code MATRIX_ADMIN_ENABLED} must not be armed before that path exists.
+     *
+     * <p>Bypasses {@link MatrixAdminClient} entirely, so this call is NEVER
+     * {@link BlockOutcome#isPosted()} / {@link BlockOutcome#isStubbed()} — only
+     * {@link BlockOutcome#DOMAIN_LOCKED} (fresh write; the reconcile loop applies it,
+     * never a synchronous "blocked") or {@link BlockOutcome#degraded(String)} (the
+     * admin-bff write itself failed — {@link AdminDomainLockClient}'s own circuit
+     * breaker fallback, never {@link BlockOutcome#isOk()}).
+     */
+    private Mono<BlockOutcome> matrixUserBlock(String target, String reason) {
+        return domainLocks.lock("matrix", target, reason)
+                .map(outcome -> outcome.isDegraded()
+                        ? BlockOutcome.degraded(outcome.state().substring("degraded:".length()))
+                        : BlockOutcome.DOMAIN_LOCKED);
     }
 
     // ── LIFT (clear access_suspension desired-state) ───────────────────
@@ -687,6 +722,17 @@ public class ModService {
                 out.put("note", "deactivate command posted to the tuwunel admin room (" + outcome.result()
                         + ") — the admin bot applies it asynchronously and its reply is not yet correlated; "
                         + "treat as pending until confirmed on the homeserver");
+            } else if (outcome.isDomainLocked()) {
+                out.put("note", "applied as a REVERSIBLE domain-lock (forced local-only / no-federation), "
+                        + "not the homeserver's one-way deactivate — lift with DELETE "
+                        + "/bff/mod/domain-lock/ROLE_MATRIX_DOMAINLOCKED/{user} (operator decision 51, "
+                        + "2026-09-18; reverses decision 5's \"deactivate\")");
+            } else if (outcome.isRequested()) {
+                out.put("note", "recorded as a REQUEST, not applied: tuwunel exposes no runtime "
+                        + "per-server federation-block verb, so a real instance block needs a "
+                        + "forbidden_remote_server_names config edit, a GitOps reconcile, and a homeserver "
+                        + "restart. This mod_action row is the durable, visible record of the request; "
+                        + "requested, applied by an administrator (operator decision 50, 2026-09-18)");
             }
             return out;
         }
