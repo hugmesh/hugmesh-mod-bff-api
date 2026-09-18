@@ -931,7 +931,7 @@ per-repo files.
 
 ```
 src/main/resources
-  application.yml / application-test.yml
+  application.yml                   (src/test/resources/application-test.yml is test-only)
   db/changelog/                     Liquibase (master + 001 mod-action, 002 constraints, 003 ban,
                                     004 domain-lock, 005 domain, 006 dedup-domain, 007 wiki, 008 notify,
                                     009 db-generated-id (pgcrypto / gen_random_uuid() UUID PK DEFAULT),
