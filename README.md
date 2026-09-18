@@ -713,7 +713,16 @@ initContainer) and the generator-owned deployment requirement.
     plain MXID (whitespace, newline) is refused before any HTTP so it can never widen
     the text command. The deployment side (mounting `tuwunel-admin` into this pod as
     `MATRIX_ADMIN_TOKEN`, flipping `MATRIX_ADMIN_ENABLED`) lives in the generator and
-    has not been flipped anywhere.
+    has not been flipped anywhere — measured 2026-09-17, `MATRIX_ADMIN_ENABLED` does
+    not occur in any hugmesh-generator manifest, so no deploy-time env supplies it
+    either and the only way to arm it is a deliberate per-environment variable.
+    **The block is one-way and this service has no path that reverses it:**
+    `MatrixAdminClient` is reached only from `ModService.block(...)`, while `lift` and
+    `domainUnlock` clear Casdoor / admin-bff desired-state and never touch a
+    homeserver client at all. That asymmetry is pinned by `MatrixBlockIsOneWayTest`,
+    so it is a guard rather than only this paragraph; how a lift *should* be modelled
+    when the forward verb is irreversible is an operator decision, not an
+    implementation gap (proposed on hugmesh-generator#347).
   - **akkoma (Mastodon) — ✅ WIRED, dark by default.** The request shapes **are**
     pinned in code (`PATCH /api/v1/pleroma/admin/users/deactivate` with
     `{"nicknames":[localpart]}` for block-user, `DELETE
@@ -731,6 +740,21 @@ initContainer) and the generator-owned deployment requirement.
   and **always** recorded in `mod_action`, so every block is fully auditable. The
   `external.{matrix,mastodon}.enabled` flags default `false`, so a homeserver-less
   cluster stays inert.
+
+  **That "defaults false" is a tested contract, on three axes.**
+  `ExternalAdminDefaultsTest` resolves the shipped configuration and asserts the flag
+  is `false` (and both clients `STUBBED`) (1) from the `@Value` fallbacks alone,
+  (2) from the packaged `application.yml` with **no** profile - what a cluster pod
+  resolves, since `specs/cluster/manifests/mod-bff-api/deployment.yaml` sets no
+  `SPRING_PROFILES_ACTIVE` - and (3) under **every profile the jar can activate**,
+  discovered at runtime from the build output: one per packaged
+  `application-<profile>.*`, one per `spring.config.activate.on-profile` document
+  inside any packaged file, plus the measured deployed names (`casdoor`, which
+  `tests/stack/compose.local.yaml` sets for this service, `dev`, `test`). Axis (3)
+  exists because a packaged `application-casdoor.yml` containing
+  `external.matrix.enabled: true` used to leave the whole class green while
+  `MatrixAdminClient` stopped being stubbed - a text-level or profile-less guard
+  cannot see it.
 - **No auto-apply of an approved decision.** An approved moderation request in
   federation-api authorises a kill-switch/removal action; wiring that
   auto-application is intentionally left as a separate, auditable step (it lives in
