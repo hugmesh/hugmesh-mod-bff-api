@@ -53,14 +53,16 @@ import java.util.Set;
  * changing the fail-open HTTP behaviour itself.
  *
  * <h3>Caching — mirrors the gateway's {@code BffJwtExchangeWebFilter} exactly</h3>
- * See {@link SessionExchangeCache}. Positive-only, {@code sha256(token)}-keyed, default 5s
- * hard-clamped to a 60s ceiling; {@code cache-ttl-ms<=0} disables the cache entirely (every
- * call re-consults admin-bff's exchange gate — zero suspension-bypass window). <b>The TTL
- * IS the suspension-bypass window</b>: a cache hit skips admin-bff's own {@code
- * suspensionGate()} re-check, so the TTL bounds how stale a just-banned account's
- * continued federation-api/admin-bff/owncast-bff access can be via this path — the SAME
- * reasoning the gateway's cache already worked through, reproduced here rather than
- * re-derived.
+ * See {@link SessionExchangeCache}. Positive-only, {@code sha256(token)}-keyed, default
+ * {@code 0} (cache OFF, operator decision 60, 2026-09-18 — previously {@code 5000})
+ * hard-clamped to a 60s ceiling when a deployment opts into a positive value; {@code
+ * cache-ttl-ms<=0} disables the cache entirely (every call re-consults admin-bff's
+ * exchange gate — zero suspension-bypass window, the shipped posture). <b>The TTL IS THE
+ * SUSPENSION-BYPASS WINDOW</b>: a cache hit skips admin-bff's own {@code
+ * suspensionGate()} re-check, so any positive TTL bounds how stale a just-banned
+ * account's continued federation-api/admin-bff/owncast-bff access can be via this path —
+ * the SAME reasoning the gateway's cache already worked through (and, since decision 7 of
+ * 2026-09-16, defaults to zero there too), reproduced here rather than re-derived.
  *
  * <p><b>Public visibility.</b> {@link BearerForwardingFilter} is shared onto THREE
  * downstream {@code WebClient}s wired from three different packages ({@code

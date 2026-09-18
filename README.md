@@ -555,7 +555,10 @@ the raw `bff_` token (stashed into the Reactor `Context` by
 `BffRawTokenContextWebFilter`) is swapped for the real custody-held Casdoor JWT
 via admin-bff-api's `POST /bff/internal/session/exchange`
 (`SessionExchangeService`/`SessionExchangeClient`, with a positive-only TTL cache
-mirroring the gateway's own exchange cache). Gated behind
+mirroring the gateway's own exchange cache — **default `cache-ttl-ms=0` since
+2026-09-18, operator decision 60 on hugmesh-mod-bff-api#15: the cache is OFF, every
+exchange call re-consults admin-bff's suspension gate, mirroring hugmesh-gateway PR
+#30's decision-7 posture; the previous default was `5000`**). Gated behind
 `app.bff-exchange.enabled` (default `false`); on ANY failure — the feature not
 opted in, custody not configured on admin-bff-api, an unknown/expired session, or
 a transient outage — the filter falls through to exactly the pre-fix behaviour:

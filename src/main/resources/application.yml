@@ -308,8 +308,12 @@ app:
     # BffJwtExchangeWebFilter cache exactly. The TTL IS the suspension-bypass window (a cache hit
     # skips the exchange endpoint's own suspensionGate() re-check) — hard-clamped to a 60s ceiling
     # regardless of this value; <=0 disables the cache entirely (zero suspension-bypass window, one
-    # exchange call per request).
-    cache-ttl-ms: "${APP_BFF_EXCHANGE_CACHE_TTL_MS:5000}"
+    # exchange call per request). DEFAULT 0 = CACHE OFF (operator decision 60, 2026-09-18,
+    # hugmesh-mod-bff-api#15, "extend" — mirrors hugmesh-gateway PR #30's decision 7 posture onto
+    # this BFF's own mirrored cache). The previous default was 5000. This default is pinned by
+    # SessionExchangeCacheTtlDefaultTest (constant, @Value fallback and this line must agree at 0)
+    # — a drift back to 5000 here goes red.
+    cache-ttl-ms: "${APP_BFF_EXCHANGE_CACHE_TTL_MS:0}"
     cache-max-size: "${APP_BFF_EXCHANGE_CACHE_MAX_SIZE:10000}"
     # Timeout for the exchange call. A transient failure here degrades to no Authorization header
     # (soft fail-open) — see SessionExchangeService's class javadoc for why that is the correct
