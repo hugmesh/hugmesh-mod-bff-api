@@ -115,15 +115,21 @@ public final class StepUpRequiredException extends ApiException {
      * mod-ui's {@code /requires step-up/i}) passes through VERBATIM. A null/blank message
      * becomes the canonical wording rather than NPE-ing the renderer's
      * {@code Map.of("error", ...)}.
+     *
+     * <p>Both fallback templates below are byte-identical to admin-bff's, including the
+     * {@code present } before the header name — no caller in this repo can reach either
+     * branch today ({@link #forRetryHeader} always composes a message that already carries
+     * the phrase), but a divergence here would become a second dialect the day one does.
      */
     private static String withLegacyPhrase(String message, String retryHeader) {
         if (message != null && message.toLowerCase(Locale.ROOT).contains(LEGACY_PHRASE)) {
             return message;
         }
         if (message == null || message.isBlank()) {
-            return "this operation " + LEGACY_PHRASE + " re-authentication (" + retryHeader + ")";
+            return "this operation " + LEGACY_PHRASE + " re-authentication (present "
+                    + retryHeader + ")";
         }
-        return message + " (" + LEGACY_PHRASE + " re-authentication: " + retryHeader + ")";
+        return message + " (" + LEGACY_PHRASE + " re-authentication: present " + retryHeader + ")";
     }
 
     /** The step-up flavour advertised on the wire; see the class javadoc for what it means here. */

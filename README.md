@@ -464,18 +464,34 @@ nothing else), so the client's follow-up is *complete a challenge, then retry th
 request unchanged*. It is advertised so the flavour is observable and so a future token
 leg needs no client change.
 
-**Every other refusal stays byte-identical.** `ModStepUpAccessDeniedHandler` is a
-pass-through to Spring Security's own `HttpStatusServerAccessDeniedHandler` unless all
+**Every other refusal stays byte-identical** - status, every header and the body -
+and that is measured, not asserted in prose. `ModStepUpAccessDeniedHandler` is a
+pass-through to the handler Spring Security installs on *this* chain unless all
 four of: the gate is armed, the request is one of the five shapes above, the caller
-passed the **role** half, and the caller does not satisfy the gate. The role-half
+passed the **role** half, and the caller does not satisfy the gate. That delegate is
+`BearerTokenServerAccessDeniedHandler`, **not** the bare status handler: installing an
+explicit `accessDeniedHandler` makes `ServerHttpSecurity` discard its
+`defaultAccessDeniedHandlers` wholesale, and for a chain that configures
+`oauth2ResourceServer` (both of ours do) those defaults resolve to the bearer one. A
+pass-through to `HttpStatusServerAccessDeniedHandler` would have dropped
+`WWW-Authenticate: Bearer` from, and added a `text/plain` `Access Denied` body to,
+**every** non-step-up 403 this service emits - measured on 2026-09-17, and now pinned
+by `StepUpAccessDeniedWiringTest`, which extracts Spring's own handler from a stock
+chain at runtime and compares the two responses field by field. (The step-up response
+itself is the one deliberate exception: it is a new shape by design and carries no
+`WWW-Authenticate`, since re-presenting the same bearer is exactly what will not
+satisfy it.) The role-half
 re-check is the load-bearing one — a plain `ROLE_USER` is refused on these same paths by
 the chain rule, and dressing that up as a step-up requirement would offer an MFA
 challenge that could never let them through. Pinned by `ModStepUpGateControllerTest`
 (signal present on all five, absent on a role 403, on a non-sensitive 403 and on a 401),
-`ModStepUpSignalDarkTest` (nothing signals while the flag is dark) and
+`ModStepUpSignalDarkTest` (nothing signals while the flag is dark),
 `ModStepUpConjunctInventoryTest`, which derives the gated mappings from the
 `@PreAuthorize` annotations and from `ModStepUpGate.SENSITIVE_WRITES` reflectively and
-fails if the two lists ever differ.
+fails if the two lists ever differ, `ModStepUpSignalDevChainTest` (the dev/test
+profile's chain, which no other slice in this repo exercises) and
+`StepUpAccessDeniedWiringTest` (both chains carry the handler; the pass-through is
+byte-identical to Spring's own).
 
 No `@PreAuthorize` expression changed: the conjunct still decides **what** is denied,
 and this only supplies **what the denial says**. The header is documented on the 403 of

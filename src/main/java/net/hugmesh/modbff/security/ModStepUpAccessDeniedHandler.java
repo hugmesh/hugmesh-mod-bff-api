@@ -3,7 +3,6 @@ package net.hugmesh.modbff.security;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.core.io.buffer.DataBuffer;
-import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.server.reactive.ServerHttpResponse;
 import org.springframework.security.access.AccessDeniedException;
@@ -12,6 +11,7 @@ import org.springframework.security.core.Authentication;
 import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.core.context.ReactiveSecurityContextHolder;
 import org.springframework.security.core.context.SecurityContext;
+import org.springframework.security.oauth2.server.resource.web.access.server.BearerTokenServerAccessDeniedHandler;
 import org.springframework.security.web.server.authorization.HttpStatusServerAccessDeniedHandler;
 import org.springframework.security.web.server.authorization.ServerAccessDeniedHandler;
 import org.springframework.web.server.ServerWebExchange;
@@ -33,9 +33,9 @@ import java.util.Map;
  * <h2>The problem</h2>
  * {@link ModStepUpGate} denies through a {@code @PreAuthorize} conjunct
  * ({@code "hasAnyRole('MOD','ADMIN') and @modStepUpGate.satisfied(authentication)"}), so the
- * refusal it produces is an ordinary {@link AccessDeniedException}: Spring Security's default
- * {@link HttpStatusServerAccessDeniedHandler} renders a bare 403 with no body and no header,
- * byte-identical to "you may not ban a moderator". hugmesh-mod-ui shipped the whole client
+ * refusal it produces is an ordinary {@link AccessDeniedException}: the chain's default
+ * handler renders a bare 403 with no body and no step-up header, byte-identical to "you may
+ * not ban a moderator". hugmesh-mod-ui shipped the whole client
  * half of the step-up flow and it is INERT because neither of its detection legs can fire
  * against that denial. See hugmesh-mod-bff-api#16.
  *
@@ -44,8 +44,35 @@ import java.util.Map;
  * renders the refusal as {@link StepUpRequiredException} does — status 403 (unchanged),
  * {@code {"error": "<verb> requires step-up re-authentication (present X-Mod-StepUp)"}} and
  * the {@value StepUpRequiredException#SIGNAL_HEADER} response header. EVERY other denial is
- * delegated, untouched, to the same {@link HttpStatusServerAccessDeniedHandler} Spring
- * Security would have used — so no other refusal's wire shape moves.
+ * delegated, untouched, to {@link #DEFAULT} — the very handler Spring Security installs on
+ * THIS chain when nothing overrides it — so no other refusal's wire shape moves.
+ *
+ * <h2>Why the delegate is the BEARER handler, not {@link HttpStatusServerAccessDeniedHandler}</h2>
+ * Installing an explicit {@code accessDeniedHandler} makes {@code ServerHttpSecurity} discard
+ * its {@code defaultAccessDeniedHandlers} wholesale, so the delegate has to be chosen to
+ * match what those defaults resolve to — and for a chain that configures
+ * {@code oauth2ResourceServer} (both of this service's chains do) that is
+ * {@code BearerTokenServerAccessDeniedHandler}, NOT the bare status handler. MEASURED on
+ * 2026-09-17 against a chain built exactly like {@code SecurityConfig.filterChain} minus the
+ * {@code exceptionHandling} call, refusing an authenticated {@code ROLE_USER} on
+ * {@code GET /bff/mod/audit}:
+ *
+ * <pre>
+ *   Spring's own:        403, WWW-Authenticate: Bearer, empty body
+ *   delegating to the    403, no WWW-Authenticate,      Content-Type: text/plain,
+ *   bare status handler:                                body "Access Denied"
+ * </pre>
+ *
+ * i.e. delegating to the bare status handler would have silently changed EVERY non-step-up
+ * 403 this service emits — dropping a header and inventing a body — which is precisely what
+ * this handler promises not to do. {@code StepUpAccessDeniedWiringTest} pins the equivalence
+ * by driving the same refusal through both chain shapes and comparing status, headers and
+ * body, so a future Spring that resolves its defaults differently goes red here rather than
+ * changing the wire under a green suite.
+ *
+ * <p>The STEP-UP response is the one deliberate exception: it is a new shape by design (it
+ * gains the signal header and a JSON body) and does not carry {@code WWW-Authenticate},
+ * because re-presenting the same bearer credential is exactly what will NOT satisfy it.
  *
  * <h2>The narrow case — all four must hold</h2>
  * <ol>
@@ -75,9 +102,13 @@ import java.util.Map;
  */
 public class ModStepUpAccessDeniedHandler implements ServerAccessDeniedHandler {
 
-    /** Exactly what {@code ServerHttpSecurity} installs when nothing overrides it. */
+    /**
+     * Exactly what {@code ServerHttpSecurity} installs on a chain that configures
+     * {@code oauth2ResourceServer} and nothing else — see the class javadoc for the
+     * measurement. Stateless and thread-safe, so one instance serves every chain.
+     */
     private static final ServerAccessDeniedHandler DEFAULT =
-            new HttpStatusServerAccessDeniedHandler(HttpStatus.FORBIDDEN);
+            new BearerTokenServerAccessDeniedHandler();
 
     private static final ObjectMapper JSON = new ObjectMapper();
 
