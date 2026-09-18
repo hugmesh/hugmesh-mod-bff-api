@@ -97,7 +97,10 @@ class BffTokenHeaderCarrierSliceTest extends SecuritySliceSupport {
                 TenancyResolvers.tenantResolver(tenancy);
 
         SecurityConfig config = new SecurityConfig(registry, provider(resolver), false, 600000L);
-        SecurityWebFilterChain chain = config.filterChain(ServerHttpSecurity.http());
+        // The chain now takes its accessDeniedHandler as an argument; build it exactly as the
+        // @Bean method does, with the step-up gate on its SHIPPED-DARK default (false).
+        SecurityWebFilterChain chain = config.filterChain(ServerHttpSecurity.http(),
+                config.modStepUpAccessDeniedHandler(config.modStepUpGate(false), config.roleHierarchy()));
         WebFilterChainProxy securityFilter = new WebFilterChainProxy(chain);
 
         @SuppressWarnings("unchecked")
