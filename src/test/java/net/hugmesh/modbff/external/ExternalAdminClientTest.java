@@ -232,12 +232,15 @@ class ExternalAdminClientTest {
         assertThat(rec.requests).hasSize(1);
     }
 
+    // Decision 50 (2026-09-18): recorded as a REQUEST, not a failure — nothing here can
+    // attempt the effect at all, so this is deliberately NOT `degraded`.
     @Test
-    void matrixBlockInstance_enabled_noTuwunelVerb_degrades_noHttpCall() {
+    void matrixBlockInstance_enabled_noTuwunelVerb_isRequested_noHttpCall() {
         Recorder rec = matrixRecorder();
         StepVerifier.create(matrix(rec, true, "secret-tok").blockInstance("evil.example"))
                 .assertNext(o -> {
-                    assertThat(o.result()).isEqualTo("degraded:no-tuwunel-verb");
+                    assertThat(o.result()).isEqualTo("requested:no-tuwunel-verb");
+                    assertThat(o.isRequested()).isTrue();
                     assertThat(o.isOk()).isFalse();
                 })
                 .verifyComplete();
@@ -413,6 +416,26 @@ class ExternalAdminClientTest {
         assertThat(BlockOutcome.degraded("timeout").result()).isEqualTo("degraded:timeout");
         assertThat(BlockOutcome.OK.result()).isEqualTo("ok");
         assertThat(BlockOutcome.STUBBED.isStubbed()).isTrue();
+    }
+
+    // Decision 50/51 (2026-09-18): the two new outcome kinds are distinct from both
+    // `degraded` (a failure) and `ok` (a confirmed effect) — see BlockOutcome's class
+    // javadoc for why they need to stay distinguishable.
+    @Test
+    void blockOutcome_requested_isDistinctFromDegradedAndOk() {
+        BlockOutcome requested = BlockOutcome.requested("no-tuwunel-verb");
+        assertThat(requested.result()).isEqualTo("requested:no-tuwunel-verb");
+        assertThat(requested.isRequested()).isTrue();
+        assertThat(requested.isOk()).isFalse();
+        assertThat(requested.isStubbed()).isFalse();
+        assertThat(BlockOutcome.degraded("no-tuwunel-verb").isRequested()).isFalse();
+    }
+
+    @Test
+    void blockOutcome_domainLocked_isNeverOk() {
+        assertThat(BlockOutcome.DOMAIN_LOCKED.result()).isEqualTo("domain-locked");
+        assertThat(BlockOutcome.DOMAIN_LOCKED.isDomainLocked()).isTrue();
+        assertThat(BlockOutcome.DOMAIN_LOCKED.isOk()).isFalse();
     }
 
     // ---- A2: the deactivate nickname must be FOLDED to the provisioned akkoma form ----

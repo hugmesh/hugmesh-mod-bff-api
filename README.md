@@ -131,7 +131,7 @@ resource-server filter chain path rule, and `@PreAuthorize` on every method.
 | `/bff/mod/moderation` | GET | List the federation moderation queue (`?status=`) | **federation-api** |
 | `/bff/mod/moderation` | POST | Record a recommendation (user→mod chain middle step) | **federation-api** + audit |
 | `/bff/mod/moderation/{id}/refer` | POST | **Refer / escalate** a request UP to an admin | **federation-api** + audit |
-| `/bff/mod/block` | POST | Server-wide block a user/instance on Matrix/Mastodon | **external** (Matrix ✅ wired, dark — `posted`, never `ok` · akkoma ✅ wired, dark) + audit |
+| `/bff/mod/block` | POST | Server-wide block a user/instance on Matrix/Mastodon | Matrix user → **REVERSIBLE domain-lock** (decision 51, not the homeserver) · Matrix instance → **REQUEST recorded**, not applied (decision 50) · akkoma ✅ wired, dark — homeserver call | + audit |
 | `/bff/mod/ban` | POST | **Ban** a user from a platform-access role (writes desired-state) | **admin-bff** + audit |
 | `/bff/mod/ban` | DELETE | **Lift** a previously written ban | **admin-bff** + audit |
 | `/bff/mod/domain-lock/{role}/{user}` | POST | **Domain-lock** a user (force local-only / no-federation) | **admin-bff** + audit |
@@ -145,11 +145,15 @@ resource-server filter chain path rule, and `@PreAuthorize` on every method.
 | `/bff/mod/audit` | GET | Read the local moderator-action audit trail (`?mine=`, domain-scoped) | **own audit table** |
 | `/bff/mod/status` | GET | Caller's own moderator status (roles + domain) — UI polling for role-change detection | own JWT (no downstream) |
 
-**Ban vs. block.** `block` drives the homeserver admin call directly (both legs are
-✅ wired-but-dark — real HTTP once enabled; the Matrix/tuwunel leg posts an admin-room
-`!admin users deactivate` whose effect is asynchronous and not yet correlated, so it
-reports `posted:<event_id>`, never `ok` — see *Honest deferrals*); `ban` does NOT touch Casdoor or the
-homeserver itself — it writes the
+**Ban vs. block.** `block`'s effect differs by platform and scope, since operator
+decisions 50/51 (2026-09-18, hugmesh-generator#347) split what used to be one
+homeserver-admin call into three: **Matrix + user** now writes the SAME reversible
+`domain_lock` desired-state `domain-lock` does (never the irreversible `!admin
+users deactivate` transport — see *Reversibility* below); **Matrix + instance**
+records a durable REQUEST (`requested:no-tuwunel-verb`), never attempting
+anything, because tuwunel has no runtime per-server block verb; **akkoma
+(Mastodon), both scopes** still drives the homeserver admin call directly (✅
+wired-but-dark — real HTTP once enabled, `ok` on success). `ban` does NOT touch Casdoor or the
 `access_suspension` **desired-state** in `hugmesh-admin-bff-api` (which owns the
 route-access DB + the single-writer reconcile loop) and the loop converges Casdoor
 membership + the homeserver suspend state. Both return **`202 {state:'pending-reconcile'}`**
@@ -165,6 +169,22 @@ see *Multi-tenancy / domain-scoping*). The matrix/mastodon `block` path addition
 service layer. Bans are **idempotent**: a deterministic `dedup_key` (a unique
 index + `INSERT ... ON CONFLICT DO NOTHING`) absorbs at-least-once redelivery so a
 retry neither double-records nor re-issues the desired-state write.
+
+**Reversibility (decision 51, reverses decision 5).** Before 2026-09-18, a
+MOD-initiated Matrix USER block posted `!admin users deactivate` — irreversible,
+because tuwunel has no `activate` verb, and neither `lift` nor `domain-unlock`
+touched a homeserver client (`MatrixBlockIsOneWayTest` pinned exactly that). The
+operator answered **B** against the "leave deactivate" recommendation: a MOD block
+must be reversible end to end, so `ModService#matrixUserBlock` now writes the
+SAME `domain_lock` desired-state the `domain-lock` endpoint below does (force
+local-only), and `DELETE /bff/mod/domain-lock/ROLE_MATRIX_DOMAINLOCKED/{user}`
+reverses it — a moderator undoes a Matrix user block from the **domain-lock**
+form/endpoint, not from `ban`/`lift`. `MatrixAdminClient.blockUser` (the deactivate
+transport) is unchanged in the code but no longer called from anywhere; it is
+reserved for a future ADMIN-only path with its own explicit confirmation
+(hugmesh-mod-bff-api#23 — not built, `MATRIX_ADMIN_ENABLED` must not be armed
+before it exists). `MatrixBlockIsOneWayTest` now pins the OPPOSITE property for
+the MOD path: block-then-domain-unlock is a genuine round trip.
 
 **Domain-lock (force local-only) — ADD-semantics, NOT a ban.** `domain-lock` forces a
 user's traffic **local-only / no-federation**. It is an **ADDITIVE marker** (`role` ∈
@@ -234,13 +254,16 @@ sequenceDiagram
   services grounded in `hugmesh-generator` manifests:
   `http://tuwunel.hugmesh-backend.svc.cluster.local:8008` (`MATRIX_BASE_URL`) and
   `http://akkoma.hugmesh-backend.svc.cluster.local:4000` (`MASTODON_BASE_URL`).
-  **Both admin calls are ✅ wired but dark by default** — akkoma issues real
+  **The akkoma client is ✅ wired but dark by default** — it issues real
   pleroma-admin HTTP only when `external.mastodon.enabled=true` AND a Vault/ESO admin
-  token is present; tuwunel posts the `!admin users deactivate` admin-room command only
-  when `external.matrix.enabled=true` AND `external.matrix.admin-token` (Vault
-  `hugmesh/tuwunel-admin` via ESO secret `tuwunel-admin`) is present, and reports
-  `posted:<event_id>` (never `ok`) because the bot applies it asynchronously; both are
-  inert otherwise (see *Honest deferrals*).
+  token is present, and is inert otherwise. **The Matrix client's transport is
+  ✅ wired but, since decision 51 (2026-09-18), UNREACHABLE from the MOD path** — see
+  *Reversibility* and *Honest deferrals*: `ModService` no longer calls it; if a
+  future ADMIN-only path (hugmesh-mod-bff-api#23) ever does, it would post `!admin
+  users deactivate` when `external.matrix.enabled=true` AND
+  `external.matrix.admin-token` (Vault `hugmesh/tuwunel-admin` via ESO secret
+  `tuwunel-admin`) is present, reporting `posted:<event_id>` (never `ok`) because
+  the bot applies it asynchronously.
 - **admin-bff** (`hugmesh-admin-bff-api`) — the ban/lift surface writes the
   `access_suspension` desired-state via `POST/DELETE /bff/admin/access-roles/{role}/{user}`,
   and the domain-lock surface writes the SEPARATE `domain_lock` desired-state via
@@ -691,41 +714,54 @@ initContainer) and the generator-owned deployment requirement.
 
 - **Both homeserver admin calls are wired-but-dark; the Matrix one never reports
   `ok`.** The reactive `WebClient`s are wired in both clients; the two legs differ:
-  - **tuwunel (Matrix) — ✅ WIRED for block-user, dark by default, `posted` never
-    `ok`.** A Conduit-family server with, per the generator manifest + upstream
-    source, **no Synapse-style `/_synapse/admin` REST API and no HTTP admin surface
-    at all** — server-admin verbs are `!admin ...` text commands posted as
-    `m.room.message` events into the admin room (`#admins:hugmesh.net`) and answered
-    asynchronously by an in-process bot. When `external.matrix.enabled=true` AND
-    `external.matrix.admin-token` is present (Vault `hugmesh/tuwunel-admin` property
-    `token` via the ESO secret `tuwunel-admin` — the same one the generator's
-    `tuwunel-admin-sync` Job mounts), `MatrixAdminClient` resolves the admin-room
-    alias once (`GET /_matrix/client/v3/directory/room/{alias}`, cached) and PUTs
-    `!admin users deactivate @localpart:server` with a fresh txnId
-    (`/_matrix/client/v3/rooms/{roomId}/send/m.room.message/{txnId}`). The outcome is
-    `posted:<event_id>` — the HTTP 200 only ACKs that the command message landed in
-    the room, not that the bot applied it — so the controller stays at 202
-    pending-reconcile and the event id is the audit row's correlation handle. Still
-    deferred: **reply correlation** (reading the bot's `m.in_reply_to` answer back and
-    pinning its success/failure text against the deployed tuwunel — only then may an
-    outcome become `ok`), **block-instance** (no runtime per-server federation-block
-    verb exists; the leg degrades `no-tuwunel-verb`, the generator egress
-    NetworkPolicy is the backstop) and **un-block** (no `activate` verb). Off (the
-    default) it returns `STUBBED` with no HTTP; on without a token it degrades
-    `no-admin-token` rather than posting unauthenticated. A target that is not a
-    plain MXID (whitespace, newline) is refused before any HTTP so it can never widen
-    the text command. The deployment side (mounting `tuwunel-admin` into this pod as
-    `MATRIX_ADMIN_TOKEN`, flipping `MATRIX_ADMIN_ENABLED`) lives in the generator and
-    has not been flipped anywhere — measured 2026-09-17, `MATRIX_ADMIN_ENABLED` does
-    not occur in any hugmesh-generator manifest, so no deploy-time env supplies it
-    either and the only way to arm it is a deliberate per-environment variable.
-    **The block is one-way and this service has no path that reverses it:**
-    `MatrixAdminClient` is reached only from `ModService.block(...)`, while `lift` and
-    `domainUnlock` clear Casdoor / admin-bff desired-state and never touch a
-    homeserver client at all. That asymmetry is pinned by `MatrixBlockIsOneWayTest`,
-    so it is a guard rather than only this paragraph; how a lift *should* be modelled
-    when the forward verb is irreversible is an operator decision, not an
-    implementation gap (proposed on hugmesh-generator#347).
+  - **tuwunel (Matrix) — transport ✅ WIRED, but UNREACHABLE from the MOD path since
+    decision 51 (2026-09-18).** A Conduit-family server with, per the generator
+    manifest + upstream source, **no Synapse-style `/_synapse/admin` REST API and
+    no HTTP admin surface at all** — server-admin verbs are `!admin ...` text
+    commands posted as `m.room.message` events into the admin room
+    (`#admins:hugmesh.net`) and answered asynchronously by an in-process bot. The
+    transport (`MatrixAdminClient.blockUser`, `DEACTIVATE_COMMAND`) is unchanged: it
+    resolves the admin-room alias once (`GET
+    /_matrix/client/v3/directory/room/{alias}`, cached) and PUTs `!admin users
+    deactivate @localpart:server` with a fresh txnId
+    (`/_matrix/client/v3/rooms/{roomId}/send/m.room.message/{txnId}`), reporting
+    `posted:<event_id>` (never `ok`) when it runs — but **`ModService` no longer
+    calls it**. Operator decision 51 (reversing decision 5 of 2026-09-10,
+    "deactivate") answered that a MOD-initiated Matrix user block must be
+    reversible, and tuwunel has no `!admin users activate`, so `POST /bff/mod/block
+    {platform:matrix, scope:user}` now writes the SAME reversible `domain_lock`
+    desired-state the `domain-lock` endpoint uses (see *Reversibility* above) —
+    `DOMAIN_LOCKED`, never `posted`/`STUBBED`. The deactivate transport is kept
+    (unchanged code) for a future **ADMIN-only** path with its own explicit
+    confirmation — none exists yet, hugmesh-mod-bff-api#23 — so it is dormant: still
+    reachable from a direct unit test against `MatrixAdminClient`, unreachable from
+    `ModController`. **`MATRIX_ADMIN_ENABLED` must not be armed before that path
+    exists.** Still deferred if/when it is: **reply correlation** (reading the bot's
+    `m.in_reply_to` answer back and pinning its success/failure text against the
+    deployed tuwunel — only then may an outcome become `ok`) and **un-block** (no
+    `activate` verb — the admin path would need its own out-of-band remediation
+    story, since `domain-unlock` only reverses the domain-lock effect, not a real
+    deactivate). Off (the default) it returns `STUBBED` with no HTTP; on without a
+    token it degrades `no-admin-token` rather than posting unauthenticated. A target
+    that is not a plain MXID (whitespace, newline) is refused before any HTTP so it
+    can never widen the text command. The deployment side (mounting `tuwunel-admin`
+    into this pod as `MATRIX_ADMIN_TOKEN`, flipping `MATRIX_ADMIN_ENABLED`) lives in
+    the generator and has not been flipped anywhere — measured 2026-09-17,
+    `MATRIX_ADMIN_ENABLED` does not occur in any hugmesh-generator manifest.
+    **block-instance (operator decision 50)** has no runtime per-server
+    federation-block verb either — the leg records a **REQUEST**
+    (`requested:no-tuwunel-verb`, never `degraded`: nothing failed, nothing could
+    synchronously succeed) rather than attempting anything, and stays wired the same
+    way it always was (`matrix.blockInstance`, unaffected by decision 51 since it
+    never routed through the deactivate transport). Turning that request into the
+    `forbidden_remote_server_names` config edit is a separate admin/GitOps job, out
+    of scope for this repo — hugmesh-federation-api#7 (the moderation-queue entry)
+    and hugmesh-generator#564 (the apply job), both cross-linked from
+    hugmesh-mod-bff-api#1. The generator egress NetworkPolicy remains the
+    authoritative backstop meanwhile. **The MOD path is now reversible end to end
+    for a Matrix user block** — `MatrixBlockIsOneWayTest` pins the new contract
+    (block, then `domain-unlock`, is a genuine round trip); it no longer pins the
+    old one-way property.
   - **akkoma (Mastodon) — ✅ WIRED, dark by default.** The request shapes **are**
     pinned in code (`PATCH /api/v1/pleroma/admin/users/deactivate` with
     `{"nicknames":[localpart]}` for block-user, `DELETE
@@ -836,18 +872,36 @@ work as done:
   subsystem and are landing there; minimal user-preference / silencing tables are
   part of that work. No further mod-bff code change is required for the directive
   itself.
-- 🔭 **Matrix(tuwunel) reply correlation + live pin.** The admin-room
-  `!admin users deactivate` post is ✅ wired (dark by default, see *Honest
-  deferrals*) but its outcome is `posted:<event_id>`, never `ok`, until the bot's
-  asynchronous reply is read back (`/rooms/{id}/messages` or `/sync`, matching
-  `m.relates_to.m.in_reply_to.event_id` to the posted id) and its success/failure
-  text is pinned against the deployed tuwunel v1.7.0. Also open: which service owns
-  the Matrix effect long-term (this direct fire-once post vs. admin-bff's
-  desired-state reconcile loop, whose tuwunel leg is the same stub), the generator
-  wiring of `tuwunel-admin` into this pod, and the no-`activate`-verb un-block model.
-  The akkoma/Mastodon leg is **already wired** (✅, dark by default) and only awaits
-  live verification against a real akkoma instance — it is no longer a deferred
-  follow-up.
+- 🔭 **Matrix(tuwunel) ADMIN-only deactivate path (decision 51 follow-up),
+  hugmesh-mod-bff-api#23.** The `!admin users deactivate` transport is ✅ wired
+  (dark by default, see *Honest deferrals*) but, since 2026-09-18, dormant — no
+  code calls it, because the MOD path was redirected onto the reversible
+  domain-lock effect instead. Reserving it for a genuinely separate ADMIN-only
+  endpoint with its own explicit confirmation (never the shared MOD/ADMIN `POST
+  /bff/mod/block`) is unbuilt; `MATRIX_ADMIN_ENABLED` must not be armed before it
+  exists. If/when it is built: its outcome is `posted:<event_id>`, never `ok`,
+  until the bot's asynchronous reply is read back (`/rooms/{id}/messages` or
+  `/sync`, matching `m.relates_to.m.in_reply_to.event_id` to the posted id) and its
+  success/failure text is pinned against the deployed tuwunel v1.7.0; and, since it
+  would have no un-block verb either, its own remediation story is a separate
+  design question — `domain-unlock` only reverses the domain-lock effect the MOD
+  path now uses, not a real deactivate. Also open: which service owns the Matrix
+  effect long-term (this direct fire-once post vs. admin-bff's desired-state
+  reconcile loop, whose tuwunel leg is the same stub) and the generator wiring of
+  `tuwunel-admin` into this pod. The akkoma/Mastodon leg is **already wired** (✅,
+  dark by default, unaffected by decision 51) and only awaits live verification
+  against a real akkoma instance — it is no longer a deferred follow-up.
+- 🔭 **Matrix instance-block → applied config edit (decision 50), split across
+  two other repos.** `POST /bff/mod/block {platform:matrix, scope:instance}`
+  durably records the moderator's intent (`requested:no-tuwunel-verb`) but nothing
+  yet turns that into the `forbidden_remote_server_names` config edit + GitOps
+  reconcile + homeserver restart tuwunel actually needs. Two follow-up issues,
+  deliberately NOT built from this repo: hugmesh-federation-api#7 (route the
+  request into the existing submit→refer→decide moderation-approval trail, whose
+  javadoc already describes an approved `instance-block` as exactly this
+  authorisation signal) and hugmesh-generator#564 (the reconciler Job that applies
+  an approved decision, mirroring the existing `akkoma/domainlock-sync-job.yaml`
+  pattern). The generator egress NetworkPolicy remains the backstop meanwhile.
 - 🔭 **Casdoor MFA step-up — the CHALLENGE half.** The mod-bff **enforcement** half is
   ✅ shipped and documented above (*Step-up MFA on sensitive write-effects*): ban / lift
   / domain-lock / unlock / block require the `MFA_SATISFIED` marker when
