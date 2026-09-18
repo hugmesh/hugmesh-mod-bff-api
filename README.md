@@ -658,7 +658,16 @@ initContainer) and the generator-owned deployment requirement.
     plain MXID (whitespace, newline) is refused before any HTTP so it can never widen
     the text command. The deployment side (mounting `tuwunel-admin` into this pod as
     `MATRIX_ADMIN_TOKEN`, flipping `MATRIX_ADMIN_ENABLED`) lives in the generator and
-    has not been flipped anywhere.
+    has not been flipped anywhere — measured 2026-09-17, `MATRIX_ADMIN_ENABLED` does
+    not occur in any hugmesh-generator manifest, so no deploy-time env supplies it
+    either and the only way to arm it is a deliberate per-environment variable.
+    **The block is one-way and this service has no path that reverses it:**
+    `MatrixAdminClient` is reached only from `ModService.block(...)`, while `lift` and
+    `domainUnlock` clear Casdoor / admin-bff desired-state and never touch a
+    homeserver client at all. That asymmetry is pinned by `MatrixBlockIsOneWayTest`,
+    so it is a guard rather than only this paragraph; how a lift *should* be modelled
+    when the forward verb is irreversible is an operator decision, not an
+    implementation gap (proposed on hugmesh-generator#347).
   - **akkoma (Mastodon) — ✅ WIRED, dark by default.** The request shapes **are**
     pinned in code (`PATCH /api/v1/pleroma/admin/users/deactivate` with
     `{"nicknames":[localpart]}` for block-user, `DELETE
