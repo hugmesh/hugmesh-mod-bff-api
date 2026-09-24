@@ -26,6 +26,7 @@ import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
@@ -91,8 +92,6 @@ class ModServiceTest {
                 .thenReturn(Mono.just(SuspensionOutcome.PENDING));
         // block(...) happy-path defaults: the external homeserver call is STUBBED and the
         // domain-aware 7-arg record(...) writes a row.
-        when(matrix.blockUser(anyString()))
-                .thenReturn(Mono.just(net.hugmesh.modbff.external.BlockOutcome.STUBBED));
         when(matrix.blockInstance(anyString()))
                 .thenReturn(Mono.just(net.hugmesh.modbff.external.BlockOutcome.STUBBED));
         when(mastodon.blockUser(anyString()))
@@ -525,8 +524,7 @@ class ModServiceTest {
         // FAIL-CLOSED: the deny short-circuits BEFORE the privileged read, the external
         // homeserver call, and the audit row.
         verify(roles, never()).isPrivileged(anyString(), any());
-        verify(matrix, never()).blockUser(anyString());
-        verify(matrix, never()).blockInstance(anyString());
+        verifyNoInteractions(matrix);
         verify(audit, never()).record(anyString(), anyString(), anyString(), anyString(),
                 any(), anyString(), anyString());
     }
@@ -540,7 +538,7 @@ class ModServiceTest {
                 .verify();
         // Self-block is rejected BEFORE the privileged-role lookup is even needed.
         verify(roles, never()).isPrivileged(anyString(), any());
-        verify(matrix, never()).blockUser(anyString());
+        verifyNoInteractions(matrix);
         verify(audit, never()).record(anyString(), anyString(), anyString(), anyString(),
                 any(), anyString(), anyString());
     }
@@ -573,7 +571,7 @@ class ModServiceTest {
                         net.hugmesh.modbff.external.BlockOutcome.DOMAIN_LOCKED))
                 .verifyComplete();
         verify(domainLocks).lock("matrix", "@spam:evil", "abuse");
-        verify(matrix, never()).blockUser(anyString());
+        verifyNoInteractions(matrix);
         // BUG-B mirror: the block row is stamped with the caller's validated brand.
         verify(audit).record(eq("mod:x"), eq("matrix.block-user"), eq("matrix"),
                 eq("@spam:evil"), eq("abuse"), eq("domain-locked"), eq("brandx"));

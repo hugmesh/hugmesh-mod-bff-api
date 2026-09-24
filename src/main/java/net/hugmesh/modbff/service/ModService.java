@@ -494,20 +494,17 @@ public class ModService {
      * Decision 51 (operator, 2026-09-18, answer <b>B</b> — AGAINST the "leave deactivate"
      * recommendation): a MOD-initiated Matrix USER block must be REVERSIBLE end to end.
      * tuwunel's only user-block verb is the one-way {@code !admin users deactivate} (no
-     * {@code activate} exists), so this no longer drives
-     * {@link MatrixAdminClient#blockUser}. Instead it writes the SAME {@code domain_lock}
-     * desired-state {@link #domainLock} does (force local-only / no-federation on the
+     * {@code activate} exists), so this never drives a deactivate. Instead it writes the
+     * SAME {@code domain_lock} desired-state {@link #domainLock} does (force local-only / no-federation on the
      * {@code matrix} platform) — which {@code DELETE
      * /bff/mod/domain-lock/ROLE_MATRIX_DOMAINLOCKED/{user}} ({@link #domainUnlock}, via
      * {@link AdminDomainLockClient#unlock}) already reverses. <b>This REVERSES decision
      * 5</b> ("ANSWERED 2026-09-10: deactivate", hugmesh-mod-bff-api#1) for the MOD path
      * specifically.
      *
-     * <p>The deactivate transport ({@link MatrixAdminClient#blockUser},
-     * {@code DEACTIVATE_COMMAND}) is UNCHANGED and stays in the codebase for a future
-     * ADMIN-only path with its own explicit confirmation — none exists yet (see
-     * hugmesh-mod-bff-api#23) — so it is no longer reachable from anywhere in this
-     * service. {@code MATRIX_ADMIN_ENABLED} must not be armed before that path exists.
+     * <p>The ADMIN-only deactivate lives in hugmesh-admin-bff-api behind a propose/confirm
+     * pair (decision 83b, hugmesh-admin-bff-api#115); mod-bff's former copy of the
+     * transport ({@code MatrixAdminClient.blockUser}) was deleted (hugmesh-mod-bff-api#23).
      *
      * <p>Bypasses {@link MatrixAdminClient} entirely, so this call is NEVER
      * {@link BlockOutcome#isPosted()} / {@link BlockOutcome#isStubbed()} — only

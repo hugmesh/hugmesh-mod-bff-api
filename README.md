@@ -57,9 +57,11 @@ security/tenancy code); conventions copied verbatim from `hugmesh-admin-bff-api`
   BFF **unswapped**, so this BFF resolves the session itself. See *Native-login
   (`bff_` session) support* below.
 
-Topology (solid = ✅ shipped call path; dashed = 🔭 planned component; both block legs
-are ✅ wired-but-dark — real HTTP when enabled; the Matrix leg posts an admin-room
-command whose effect is asynchronous, so it reports `posted`, never `ok`):
+Topology (solid = ✅ shipped call path; dashed = 🔭 planned component; the akkoma
+block leg is ✅ wired-but-dark — real HTTP when enabled. There is no tuwunel edge: a
+Matrix user block is a reversible domain-lock written through admin-bff, a Matrix
+instance block is a request filed with federation-api, and the one-way Matrix
+deactivate lives in admin-bff since decision 83b):
 
 ```mermaid
 flowchart LR
@@ -72,7 +74,6 @@ flowchart LR
     admin["hugmesh-admin-bff-api<br/>(desired-state + reconcile)"]
     owncast["hugmesh-owncast-bff-api<br/>(hide/kill/restore)"]
     casdoor["Casdoor<br/>(via PKI gateway)"]
-    matrix["tuwunel<br/>(Matrix admin)"]
     akkoma["akkoma<br/>(Mastodon admin)"]
 
     mod --> gw
@@ -83,7 +84,6 @@ flowchart LR
     bff -->|"bearer fwd + mTLS<br/>ban/lift/domain-lock"| admin
     bff -->|"bearer fwd + mTLS<br/>hide/kill/restore"| owncast
     bff -->|"target role / org lookup"| casdoor
-    bff -->|"block-user (✅ wired, dark; posted, never ok)"| matrix
     bff -->|"block (✅ wired, dark by default)"| akkoma
 
     classDef planned stroke-dasharray:4,stroke:#888;
@@ -179,12 +179,14 @@ must be reversible end to end, so `ModService#matrixUserBlock` now writes the
 SAME `domain_lock` desired-state the `domain-lock` endpoint below does (force
 local-only), and `DELETE /bff/mod/domain-lock/ROLE_MATRIX_DOMAINLOCKED/{user}`
 reverses it — a moderator undoes a Matrix user block from the **domain-lock**
-form/endpoint, not from `ban`/`lift`. `MatrixAdminClient.blockUser` (the deactivate
-transport) is unchanged in the code but no longer called from anywhere; it is
-reserved for a future ADMIN-only path with its own explicit confirmation
-(hugmesh-mod-bff-api#23 — not built, `MATRIX_ADMIN_ENABLED` must not be armed
-before it exists). `MatrixBlockIsOneWayTest` now pins the OPPOSITE property for
-the MOD path: block-then-domain-unlock is a genuine round trip.
+form/endpoint, not from `ban`/`lift`. The one-way deactivate is no longer in this
+service at all: decision 83b (2026-09-23) moved the ADMIN-only deactivate to
+hugmesh-admin-bff-api (`POST /bff/admin/matrix/deactivations/propose`, then
+`.../confirm`, hugmesh-admin-bff-api#115), and this repo's former copy
+(`MatrixAdminClient.blockUser` + `DEACTIVATE_COMMAND`) was deleted
+(hugmesh-mod-bff-api#23; `MatrixAdminClientNoUserDeactivateTest` fails if it comes
+back). `MatrixBlockIsOneWayTest` pins the OPPOSITE of its old property for the MOD
+path: block-then-domain-unlock is a genuine round trip.
 
 **Domain-lock (force local-only) — ADD-semantics, NOT a ban.** `domain-lock` forces a
 user's traffic **local-only / no-federation**. It is an **ADDITIVE marker** (`role` ∈
@@ -256,14 +258,14 @@ sequenceDiagram
   `http://akkoma.hugmesh-backend.svc.cluster.local:4000` (`MASTODON_BASE_URL`).
   **The akkoma client is ✅ wired but dark by default** — it issues real
   pleroma-admin HTTP only when `external.mastodon.enabled=true` AND a Vault/ESO admin
-  token is present, and is inert otherwise. **The Matrix client's transport is
-  ✅ wired but, since decision 51 (2026-09-18), UNREACHABLE from the MOD path** — see
-  *Reversibility* and *Honest deferrals*: `ModService` no longer calls it; if a
-  future ADMIN-only path (hugmesh-mod-bff-api#23) ever does, it would post `!admin
-  users deactivate` when `external.matrix.enabled=true` AND
-  `external.matrix.admin-token` (Vault `hugmesh/tuwunel-admin` via ESO secret
-  `tuwunel-admin`) is present, reporting `posted:<event_id>` (never `ok`) because
-  the bot applies it asynchronously.
+  token is present, and is inert otherwise. **The Matrix client issues no HTTP at
+  all**: its only verb is the instance block, which records a REQUEST
+  (`requested:no-tuwunel-verb`, decision 50). Its former user deactivate (the
+  admin-room `!admin users deactivate` transport) moved to hugmesh-admin-bff-api
+  under decision 83b (hugmesh-mod-bff-api#23), so `MATRIX_BASE_URL` /
+  `MATRIX_SERVER_NAME` / `MATRIX_ADMIN_ROOM` are still defined in `application.yml`
+  but nothing in this service reads them any more — see *Reversibility* and
+  *Honest deferrals*.
 - **admin-bff** (`hugmesh-admin-bff-api`) — the ban/lift surface writes the
   `access_suspension` desired-state via `POST/DELETE /bff/admin/access-roles/{role}/{user}`,
   and the domain-lock surface writes the SEPARATE `domain_lock` desired-state via
@@ -712,48 +714,35 @@ initContainer) and the generator-owned deployment requirement.
 
 ## Honest deferrals
 
-- **Both homeserver admin calls are wired-but-dark; the Matrix one never reports
-  `ok`.** The reactive `WebClient`s are wired in both clients; the two legs differ:
-  - **tuwunel (Matrix) — transport ✅ WIRED, but UNREACHABLE from the MOD path since
-    decision 51 (2026-09-18).** A Conduit-family server with, per the generator
-    manifest + upstream source, **no Synapse-style `/_synapse/admin` REST API and
-    no HTTP admin surface at all** — server-admin verbs are `!admin ...` text
-    commands posted as `m.room.message` events into the admin room
-    (`#admins:hugmesh.net`) and answered asynchronously by an in-process bot. The
-    transport (`MatrixAdminClient.blockUser`, `DEACTIVATE_COMMAND`) is unchanged: it
-    resolves the admin-room alias once (`GET
-    /_matrix/client/v3/directory/room/{alias}`, cached) and PUTs `!admin users
-    deactivate @localpart:server` with a fresh txnId
-    (`/_matrix/client/v3/rooms/{roomId}/send/m.room.message/{txnId}`), reporting
-    `posted:<event_id>` (never `ok`) when it runs — but **`ModService` no longer
-    calls it**. Operator decision 51 (reversing decision 5 of 2026-09-10,
-    "deactivate") answered that a MOD-initiated Matrix user block must be
-    reversible, and tuwunel has no `!admin users activate`, so `POST /bff/mod/block
-    {platform:matrix, scope:user}` now writes the SAME reversible `domain_lock`
+- **Both homeserver admin legs are dark by default; the Matrix one issues no HTTP
+  at all.** The two legs differ:
+  - **tuwunel (Matrix) — instance block only; the user deactivate moved to
+    admin-bff (decision 83b, 2026-09-23).** A Conduit-family server with, per the
+    generator manifest + upstream source, **no Synapse-style `/_synapse/admin` REST
+    API and no HTTP admin surface at all** — server-admin verbs are `!admin ...`
+    text commands posted into the admin room and answered asynchronously by an
+    in-process bot. This repo used to carry that transport
+    (`MatrixAdminClient.blockUser` + `DEACTIVATE_COMMAND`, posting `!admin users
+    deactivate @localpart:server`), unreachable from `ModService` since decision 51
+    (2026-09-18, reversing decision 5's "deactivate"): `POST /bff/mod/block
+    {platform:matrix, scope:user}` writes the SAME reversible `domain_lock`
     desired-state the `domain-lock` endpoint uses (see *Reversibility* above) —
-    `DOMAIN_LOCKED`, never `posted`/`STUBBED`. The deactivate transport is kept
-    (unchanged code) for a future **ADMIN-only** path with its own explicit
-    confirmation — none exists yet, hugmesh-mod-bff-api#23 — so it is dormant: still
-    reachable from a direct unit test against `MatrixAdminClient`, unreachable from
-    `ModController`. **`MATRIX_ADMIN_ENABLED` must not be armed before that path
-    exists.** Still deferred if/when it is: **reply correlation** (reading the bot's
-    `m.in_reply_to` answer back and pinning its success/failure text against the
-    deployed tuwunel — only then may an outcome become `ok`) and **un-block** (no
-    `activate` verb — the admin path would need its own out-of-band remediation
-    story, since `domain-unlock` only reverses the domain-lock effect, not a real
-    deactivate). Off (the default) it returns `STUBBED` with no HTTP; on without a
-    token it degrades `no-admin-token` rather than posting unauthenticated. A target
-    that is not a plain MXID (whitespace, newline) is refused before any HTTP so it
-    can never widen the text command. The deployment side (mounting `tuwunel-admin`
-    into this pod as `MATRIX_ADMIN_TOKEN`, flipping `MATRIX_ADMIN_ENABLED`) lives in
-    the generator and has not been flipped anywhere — measured 2026-09-17,
-    `MATRIX_ADMIN_ENABLED` does not occur in any hugmesh-generator manifest.
+    `DOMAIN_LOCKED`, never `posted`/`STUBBED`. Decision 83b then gave the
+    ADMIN-only deactivate to **hugmesh-admin-bff-api**, behind a propose/confirm
+    token pair and its own `MATRIX_ADMIN_DEACTIVATE_*` flags
+    (hugmesh-admin-bff-api#115), and this repo's dormant copy was deleted
+    (hugmesh-mod-bff-api#23). `MatrixAdminClientNoUserDeactivateTest` fails if a
+    user-deactivate method or the `users deactivate` verb text comes back to this
+    service's code. What is left of `MatrixAdminClient`: off (the default) it
+    returns `STUBBED`; on without a token it degrades `no-admin-token`; on with a
+    token the instance block records a REQUEST. `MATRIX_ADMIN_ENABLED` does not
+    occur in any hugmesh-generator manifest (measured 2026-09-17).
     **block-instance (operator decision 50)** has no runtime per-server
     federation-block verb either — the leg records a **REQUEST**
     (`requested:no-tuwunel-verb`, never `degraded`: nothing failed, nothing could
     synchronously succeed) rather than attempting anything, and stays wired the same
-    way it always was (`matrix.blockInstance`, unaffected by decision 51 since it
-    never routed through the deactivate transport). Turning that request into the
+    way it always was (`matrix.blockInstance`, unaffected by decisions 51 and 83b
+    since it never routed through the deactivate transport). Turning that request into the
     `forbidden_remote_server_names` config edit is a separate admin/GitOps job:
     since operator decisions 84a-d (2026-09-23) this BFF files the
     moderation-queue entry itself (hugmesh-federation-api#7 — see *Matrix
@@ -873,23 +862,16 @@ work as done:
   subsystem and are landing there; minimal user-preference / silencing tables are
   part of that work. No further mod-bff code change is required for the directive
   itself.
-- 🔭 **Matrix(tuwunel) ADMIN-only deactivate path (decision 51 follow-up),
-  hugmesh-mod-bff-api#23.** The `!admin users deactivate` transport is ✅ wired
-  (dark by default, see *Honest deferrals*) but, since 2026-09-18, dormant — no
-  code calls it, because the MOD path was redirected onto the reversible
-  domain-lock effect instead. Reserving it for a genuinely separate ADMIN-only
-  endpoint with its own explicit confirmation (never the shared MOD/ADMIN `POST
-  /bff/mod/block`) is unbuilt; `MATRIX_ADMIN_ENABLED` must not be armed before it
-  exists. If/when it is built: its outcome is `posted:<event_id>`, never `ok`,
-  until the bot's asynchronous reply is read back (`/rooms/{id}/messages` or
-  `/sync`, matching `m.relates_to.m.in_reply_to.event_id` to the posted id) and its
-  success/failure text is pinned against the deployed tuwunel v1.7.0; and, since it
-  would have no un-block verb either, its own remediation story is a separate
-  design question — `domain-unlock` only reverses the domain-lock effect the MOD
-  path now uses, not a real deactivate. Also open: which service owns the Matrix
-  effect long-term (this direct fire-once post vs. admin-bff's desired-state
-  reconcile loop, whose tuwunel leg is the same stub) and the generator wiring of
-  `tuwunel-admin` into this pod. The akkoma/Mastodon leg is **already wired** (✅,
+- ✅ **Matrix(tuwunel) ADMIN-only deactivate path — moved to hugmesh-admin-bff-api
+  (decision 83b, 2026-09-23), hugmesh-mod-bff-api#23.** The ADMIN-only deactivate
+  is built in admin-bff (`POST /bff/admin/matrix/deactivations/propose` then
+  `.../confirm`, `hasRole('ADMIN')`, dark by default, hugmesh-admin-bff-api#115),
+  and this repo's dormant copy of the transport is deleted — it is no longer a
+  mod-bff roadmap item. Still open on #23, outside this repo: the admin-ui control
+  (a separate, clearly labelled one-way action, never the moderator Block button),
+  the generator wiring that arms admin-bff's `MATRIX_ADMIN_DEACTIVATE_*`, and a live
+  check against a real tuwunel admin room.
+  The akkoma/Mastodon leg is **already wired** (✅,
   dark by default, unaffected by decision 51) and only awaits live verification
   against a real akkoma instance — it is no longer a deferred follow-up.
 - ✅ **Matrix instance-block → federation-api approval trail (decisions 84a-d,

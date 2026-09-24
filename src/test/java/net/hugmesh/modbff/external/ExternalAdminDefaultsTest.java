@@ -36,15 +36,20 @@ import static org.assertj.core.api.Assertions.assertThat;
  * Between them, NOTHING in the suite ever observed the shipped default — flipping
  * {@code ExternalAdminConfig}'s {@code @Value} default OR {@code application.yml}'s
  * {@code ${MATRIX_ADMIN_ENABLED:false}} to {@code true} left all 96 tests of the
- * block-path classes green (measured 2026-09-10, hugmesh-mod-bff-api#1). The operator's
- * decision on #1 is that the Matrix admin transport keeps the {@code deactivate} verb and
- * STAYS DARK, so the default itself is now a tested contract and not a convention.
+ * block-path classes green (measured 2026-09-10, hugmesh-mod-bff-api#1). Both admin
+ * integrations STAY DARK by operator decision, so the default itself is a tested contract
+ * and not a convention.
  *
- * <p>WHAT WOULD BREAK IF THIS FLIPPED. {@code MATRIX_ADMIN_ENABLED=true} plus a mounted
- * {@code tuwunel-admin} token makes {@code /bff/mod/block} post
- * {@code !admin users deactivate <mxid>} into the live tuwunel admin room. On tuwunel that
- * is IRREVERSIBLE — there is no {@code !admin users activate} verb — so the flag must only
- * ever be turned on deliberately, per-environment, never by an edited default.
+ * <p>WHAT WOULD BREAK IF THIS FLIPPED. For akkoma: {@code MASTODON_ADMIN_ENABLED=true} plus
+ * a mounted token makes {@code /bff/mod/block} issue real pleroma-admin calls against the
+ * live instance. For tuwunel the stake is smaller than it was: until decision 83b
+ * (2026-09-23, hugmesh-mod-bff-api#23) {@code MatrixAdminClient} carried the one-way
+ * {@code !admin users deactivate} transport, and a flipped {@code MATRIX_ADMIN_ENABLED}
+ * would have armed it. That transport now lives only in hugmesh-admin-bff-api (behind its
+ * own propose/confirm pair and its own {@code MATRIX_ADMIN_DEACTIVATE_*} flags), so the
+ * Matrix flag here only changes an instance block's outcome from {@code stubbed} to
+ * {@code requested:no-tuwunel-verb}. It stays dark anyway, and the probes below use
+ * {@code blockInstance}, the one Matrix verb left.
  *
  * <p>THREE AXES, THREE RUNNERS. The default a deployment resolves is the product of the
  * {@code @Value} fallbacks in {@link ExternalAdminConfig} (what applies when the key is
@@ -64,11 +69,12 @@ import static org.assertj.core.api.Assertions.assertThat;
  * review then found a bypass the resolved-value tests ALSO missed, along the one axis the
  * real deployment uses: a packaged {@code src/main/resources/application-casdoor.yml}
  * containing {@code external.matrix.enabled: true} left all 7 tests here green, and under
- * that profile {@code MatrixAdminClient.blockUser} stopped being stubbed. {@code casdoor}
- * is the profile the shipped container runs — hugmesh-generator
- * {@code tests/stack/compose.local.yaml:882}, service {@code hugmesh-mod-bff-api}, sets
- * {@code SPRING_PROFILES_ACTIVE: casdoor}. The cause was that {@link #shippedYml} activates
- * NO profile, so no profile-scoped document is ever inside its envelope. This repo already
+ * that profile the Matrix client stopped being stubbed (it then still carried
+ * {@code blockUser}, removed under decision 83b). {@code casdoor} is the profile the
+ * shipped container runs — hugmesh-generator {@code tests/stack/compose.local.yaml:882},
+ * service {@code hugmesh-mod-bff-api}, sets {@code SPRING_PROFILES_ACTIVE: casdoor}. The
+ * cause was that {@link #shippedYml} activates NO profile, so no profile-scoped document
+ * is ever inside its envelope. This repo already
  * has the "a profile yml is packaged into the production jar" hazard open as #12, so the
  * axis is live, not hypothetical.
  */
@@ -250,7 +256,7 @@ class ExternalAdminDefaultsTest {
                     .as("resolved external.mastodon.enabled under spring.profiles.active=%s",
                             activeProfiles)
                     .isEqualTo("false");
-            StepVerifier.create(context.getBean(MatrixAdminClient.class).blockUser("@spam:evil.example"))
+            StepVerifier.create(context.getBean(MatrixAdminClient.class).blockInstance("evil.example"))
                     .assertNext(o -> assertThat(o.isStubbed())
                             .as("matrix outcome %s under spring.profiles.active=%s",
                                     o.result(), activeProfiles)
@@ -294,13 +300,13 @@ class ExternalAdminDefaultsTest {
     }
 
     @Test
-    void matrixAdminClient_defaultsToDisabled_soBlockUserIsStubbed() {
+    void matrixAdminClient_defaultsToDisabled_soBlockInstanceIsStubbed() {
         codeDefaults.run(context -> {
             MatrixAdminClient matrix = context.getBean(MatrixAdminClient.class);
             // stubbed (not merely degraded) is the proof that `enabled` defaulted false:
             // an enabled client with the default blank token would return
-            // degraded:no-admin-token instead, and a tokened one would post the command.
-            StepVerifier.create(matrix.blockUser("@spam:evil.example"))
+            // degraded:no-admin-token instead, and a tokened one requested:no-tuwunel-verb.
+            StepVerifier.create(matrix.blockInstance("evil.example"))
                     .assertNext(o -> assertThat(o.isStubbed()).isTrue())
                     .verifyComplete();
         });
@@ -319,15 +325,16 @@ class ExternalAdminDefaultsTest {
     /**
      * The {@code @Value} default of each {@code admin-token} must be BLANK. Enabling a client
      * with the token key still unset must therefore degrade with {@code no-admin-token} and
-     * make no call; an inlined token default would instead try to post (matrix) or PATCH
-     * (mastodon) against the dead port and yield a different outcome.
+     * make no call; an inlined token default would instead record a request (matrix,
+     * {@code requested:no-tuwunel-verb}) or PATCH (mastodon) against the dead port, and
+     * yield a different outcome.
      */
     @Test
     void codeDefaults_adminTokensBlank_soEnabledClientsDegradeInsteadOfCalling() {
         codeDefaults
                 .withPropertyValues("external.matrix.enabled=true", "external.mastodon.enabled=true")
                 .run(context -> {
-                    StepVerifier.create(context.getBean(MatrixAdminClient.class).blockUser("@spam:evil.example"))
+                    StepVerifier.create(context.getBean(MatrixAdminClient.class).blockInstance("evil.example"))
                             .assertNext(o -> assertThat(o.result()).isEqualTo("degraded:no-admin-token"))
                             .verifyComplete();
                     StepVerifier.create(context.getBean(MastodonAdminClient.class).blockUser("@spam@evil.example"))
@@ -344,7 +351,7 @@ class ExternalAdminDefaultsTest {
                     .as("resolved external.matrix.enabled").isEqualTo("false");
             assertThat(context.getEnvironment().getProperty("external.mastodon.enabled"))
                     .as("resolved external.mastodon.enabled").isEqualTo("false");
-            StepVerifier.create(context.getBean(MatrixAdminClient.class).blockUser("@spam:evil.example"))
+            StepVerifier.create(context.getBean(MatrixAdminClient.class).blockInstance("evil.example"))
                     .assertNext(o -> assertThat(o.isStubbed()).as("matrix outcome %s", o.result()).isTrue())
                     .verifyComplete();
             StepVerifier.create(context.getBean(MastodonAdminClient.class).blockUser("@spam@evil.example"))

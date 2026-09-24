@@ -31,24 +31,20 @@ import static org.assertj.core.api.Assertions.assertThat;
  *       404 degrades, and ANY other non-2xx (incl. a 301 redirect) degrades on both legs,
  *       never a false OK (live-grounded against the compose stack's mainline Mastodon,
  *       which 404s the missing pleroma routes and 308-redirects the plain-HTTP port);</li>
- *   <li><b>tuwunel (matrix) — WIRED admin-room command transport, dark by default</b>:
- *       disabled → {@link BlockOutcome#STUBBED} and NO HTTP; enabled without a token →
- *       {@code degraded:no-admin-token} and NO HTTP; enabled + token → the admin-room
- *       alias is resolved (GET directory, cached) and {@code !admin users deactivate
- *       @user:server} is PUT as an m.text message with a txnId. The outcome is
- *       {@code posted:<event_id>} — NEVER ok, because the 200 ACKs the post, not the
- *       bot's asynchronous effect. Any non-2xx degrades; a target that would widen the
- *       text command (whitespace/newline) is refused before any HTTP; block-instance has
- *       no tuwunel verb and degrades with NO HTTP.</li>
+ *   <li><b>tuwunel (matrix) — instance block only, dark by default</b>: disabled →
+ *       {@link BlockOutcome#STUBBED}; enabled without a token →
+ *       {@code degraded:no-admin-token}; enabled + token → {@code requested:no-tuwunel-verb}
+ *       (tuwunel has no runtime federation-block verb, decision 50). The client holds no
+ *       HTTP client. Its former user deactivate (the admin-room
+ *       {@code !admin users deactivate} transport) moved to hugmesh-admin-bff-api under
+ *       decision 83b (hugmesh-mod-bff-api#23).</li>
  * </ul>
  */
 class ExternalAdminClientTest {
 
     /**
      * Records outgoing requests (and their serialised bodies) and replies with a
-     * configurable status + a per-request JSON body (defaults to {@code {}}; the matrix
-     * leg needs a {@code room_id} for the directory GET and an {@code event_id} for the
-     * send PUT).
+     * configurable status + a per-request JSON body (defaults to {@code {}}).
      */
     static class Recorder implements ExchangeFunction {
         final List<ClientRequest> requests = new ArrayList<>();
@@ -76,184 +72,44 @@ class ExternalAdminClientTest {
         return WebClient.builder().baseUrl("http://homeserver.test").exchangeFunction(rec).build();
     }
 
-    // ---- tuwunel (matrix): admin-room command transport, dark by default -------------
+    // ---- tuwunel (matrix): instance block only, no HTTP client at all ---------------
+    // The one-way user deactivate (admin-room "!admin users deactivate") moved to
+    // hugmesh-admin-bff-api (decision 83b, hugmesh-mod-bff-api#23); its tests went with it.
+    // MatrixAdminClient no longer holds a WebClient, so "no HTTP" is structural here and
+    // MatrixAdminClientNoUserDeactivateTest pins that the user path stays gone.
 
-    private static final String ADMIN_ROOM_ID = "!adm:hugmesh.net";
-
-    /** A recorder that answers the directory lookup with a room id and the send with an event id. */
-    private Recorder matrixRecorder() {
-        Recorder rec = new Recorder();
-        rec.reply = r -> r.url().getRawPath().contains("/directory/room/")
-                ? "{\"room_id\":\"" + ADMIN_ROOM_ID + "\",\"servers\":[\"hugmesh.net\"]}"
-                : "{\"event_id\":\"$evt1\"}";
-        return rec;
-    }
-
-    private MatrixAdminClient matrix(Recorder rec, boolean enabled, String token) {
-        return new MatrixAdminClient(web(rec), enabled, token, "hugmesh.net", "#admins:hugmesh.net");
-    }
-
-    @Test
-    void matrixBlockUser_disabled_isStubbed_noHttpCall() {
-        Recorder rec = matrixRecorder();
-        StepVerifier.create(matrix(rec, false, "tok").blockUser("@spam:evil.example"))
-                .assertNext(o -> assertThat(o.isStubbed()).isTrue())
-                .verifyComplete();
-        assertThat(rec.requests).isEmpty();
-    }
-
-    @Test
-    void matrixBlockUser_enabled_blankToken_degrades_noHttpCall() {
-        Recorder rec = matrixRecorder();
-        StepVerifier.create(matrix(rec, true, " ").blockUser("@spam:evil.example"))
-                .assertNext(o -> assertThat(o.result()).isEqualTo("degraded:no-admin-token"))
-                .verifyComplete();
-        assertThat(rec.requests).isEmpty();
-    }
-
-    @Test
-    void matrixBlockUser_enabled_resolvesAdminRoom_thenPutsDeactivateCommand_postedNeverOk() {
-        Recorder rec = matrixRecorder();
-        StepVerifier.create(matrix(rec, true, "secret-tok").blockUser("@spam:evil.example"))
-                .assertNext(o -> {
-                    assertThat(o.result()).isEqualTo("posted:$evt1");
-                    assertThat(o.isPosted()).isTrue();
-                    assertThat(o.isOk()).isFalse(); // the 200 ACKs the post, not the bot's effect
-                    assertThat(o.isStubbed()).isFalse();
-                })
-                .verifyComplete();
-        assertThat(rec.requests).hasSize(2);
-        ClientRequest lookup = rec.requests.get(0);
-        assertThat(lookup.method()).isEqualTo(HttpMethod.GET);
-        // the alias is percent-encoded as a path segment (# -> %23, : -> %3A)
-        assertThat(lookup.url().getRawPath()).isEqualTo("/_matrix/client/v3/directory/room/%23admins%3Ahugmesh.net");
-        assertThat(lookup.headers().getFirst("Authorization")).isEqualTo("Bearer secret-tok");
-        ClientRequest send = rec.requests.get(1);
-        assertThat(send.method()).isEqualTo(HttpMethod.PUT);
-        assertThat(send.url().getRawPath())
-                .startsWith("/_matrix/client/v3/rooms/%21adm%3Ahugmesh.net/send/m.room.message/modbff-");
-        assertThat(send.headers().getFirst("Authorization")).isEqualTo("Bearer secret-tok");
-        assertThat(rec.bodies.get(1))
-                .contains("\"msgtype\":\"m.text\"")
-                .contains("\"body\":\"!admin users deactivate @spam:evil.example\"");
-    }
-
-    @Test
-    void matrixBlockUser_bareLocalpart_isQualifiedToServerName() {
-        Recorder rec = matrixRecorder();
-        StepVerifier.create(matrix(rec, true, "secret-tok").blockUser("spam"))
-                .assertNext(o -> assertThat(o.isPosted()).isTrue())
-                .verifyComplete();
-        assertThat(rec.bodies.get(1)).contains("!admin users deactivate @spam:hugmesh.net\"");
-    }
-
-    @Test
-    void matrixBlockUser_targetThatWouldWidenTheCommand_isRefused_noHttpCall() {
-        // The command is ONE text line the admin bot splits into arguments: whitespace or
-        // a newline in the target would smuggle extra flags/commands into the admin room.
-        Recorder rec = matrixRecorder();
-        MatrixAdminClient client = matrix(rec, true, "secret-tok");
-        for (String bad : List.of("@spam:evil.example --no-leave-rooms",
-                "@spam:evil.example\n!admin users deactivate-all", "", "@:x", "@spam:evil.example;rm")) {
-            StepVerifier.create(client.blockUser(bad))
-                    .assertNext(o -> assertThat(o.result()).isEqualTo("degraded:bad-target"))
-                    .verifyComplete();
-        }
-        assertThat(rec.requests).isEmpty();
-    }
-
-    @Test
-    void matrixBlockUser_secondCall_reusesCachedAdminRoom() {
-        Recorder rec = matrixRecorder();
-        MatrixAdminClient client = matrix(rec, true, "secret-tok");
-        StepVerifier.create(client.blockUser("@a:evil.example")).expectNextCount(1).verifyComplete();
-        StepVerifier.create(client.blockUser("@b:evil.example")).expectNextCount(1).verifyComplete();
-        assertThat(rec.requests).hasSize(3); // GET, PUT, PUT — the alias is resolved once
-        assertThat(rec.requests.get(2).method()).isEqualTo(HttpMethod.PUT);
-    }
-
-    @Test
-    void matrixBlockUser_homeserverRejects_degradesHttp_neverOk_andDropsRoomCache() {
-        Recorder rec = matrixRecorder();
-        rec.status.set(HttpStatus.FORBIDDEN); // e.g. the token's user is not an admin-room member
-        MatrixAdminClient client = matrix(rec, true, "secret-tok");
-        StepVerifier.create(client.blockUser("@spam:evil.example"))
-                .assertNext(o -> {
-                    assertThat(o.result()).isEqualTo("degraded:http-403");
-                    assertThat(o.isOk()).isFalse();
-                })
-                .verifyComplete();
-        StepVerifier.create(client.blockUser("@spam:evil.example"))
-                .assertNext(o -> assertThat(o.result()).isEqualTo("degraded:http-403"))
-                .verifyComplete();
-        assertThat(rec.requests).hasSize(2); // both directory GETs — nothing was cached
-        assertThat(rec.requests).allSatisfy(r -> assertThat(r.method()).isEqualTo(HttpMethod.GET));
-    }
-
-    @Test
-    void matrixBlockUser_sendRejectedAfterCachedRoom_dropsCache_andReResolvesNextCall() {
-        // Populate the cache first (GET + PUT), then have the homeserver 403 the PUT alone
-        // (the cache means no GET is issued), then recover: the next call MUST re-issue
-        // the directory GET, proving degradeHttp dropped the cached room id (a recreated
-        // admin room would otherwise be posted into a dead room id forever).
-        Recorder rec = matrixRecorder();
-        MatrixAdminClient client = matrix(rec, true, "secret-tok");
-        StepVerifier.create(client.blockUser("@a:evil.example"))
-                .assertNext(o -> assertThat(o.isPosted()).isTrue())
-                .verifyComplete();
-        assertThat(rec.requests).hasSize(2); // GET, PUT — cache populated
-
-        rec.status.set(HttpStatus.FORBIDDEN);
-        StepVerifier.create(client.blockUser("@b:evil.example"))
-                .assertNext(o -> {
-                    assertThat(o.result()).isEqualTo("degraded:http-403");
-                    assertThat(o.isOk()).isFalse();
-                })
-                .verifyComplete();
-        assertThat(rec.requests).hasSize(3); // PUT only — the cached room id was used
-        assertThat(rec.requests.get(2).method()).isEqualTo(HttpMethod.PUT);
-
-        rec.status.set(HttpStatus.OK);
-        StepVerifier.create(client.blockUser("@c:evil.example"))
-                .assertNext(o -> assertThat(o.isPosted()).isTrue())
-                .verifyComplete();
-        assertThat(rec.requests).hasSize(5); // GET (re-resolved), PUT
-        assertThat(rec.requests.get(3).method()).isEqualTo(HttpMethod.GET);
-        assertThat(rec.requests.get(3).url().getRawPath()).contains("/directory/room/");
-        assertThat(rec.requests.get(4).method()).isEqualTo(HttpMethod.PUT);
-    }
-
-    @Test
-    void matrixBlockUser_aliasResolvesWithoutRoomId_degrades_noSend() {
-        Recorder rec = new Recorder(); // answers {} to everything — no room_id
-        StepVerifier.create(matrix(rec, true, "secret-tok").blockUser("@spam:evil.example"))
-                .assertNext(o -> assertThat(o.result()).isEqualTo("degraded:no-admin-room"))
-                .verifyComplete();
-        assertThat(rec.requests).hasSize(1);
+    private MatrixAdminClient matrix(boolean enabled, String token) {
+        return new MatrixAdminClient(enabled, token);
     }
 
     // Decision 50 (2026-09-18): recorded as a REQUEST, not a failure — nothing here can
     // attempt the effect at all, so this is deliberately NOT `degraded`.
     @Test
-    void matrixBlockInstance_enabled_noTuwunelVerb_isRequested_noHttpCall() {
-        Recorder rec = matrixRecorder();
-        StepVerifier.create(matrix(rec, true, "secret-tok").blockInstance("evil.example"))
+    void matrixBlockInstance_enabled_noTuwunelVerb_isRequested() {
+        StepVerifier.create(matrix(true, "secret-tok").blockInstance("evil.example"))
                 .assertNext(o -> {
                     assertThat(o.result()).isEqualTo("requested:no-tuwunel-verb");
                     assertThat(o.isRequested()).isTrue();
                     assertThat(o.isOk()).isFalse();
                 })
                 .verifyComplete();
-        assertThat(rec.requests).isEmpty();
     }
 
     @Test
-    void matrixBlockInstance_disabled_isStubbed_noHttpCall() {
-        Recorder rec = matrixRecorder();
-        StepVerifier.create(matrix(rec, false, "secret-tok").blockInstance("evil.example"))
+    void matrixBlockInstance_disabled_isStubbed() {
+        StepVerifier.create(matrix(false, "secret-tok").blockInstance("evil.example"))
                 .assertNext(o -> assertThat(o.result()).isEqualTo("stubbed"))
                 .verifyComplete();
-        assertThat(rec.requests).isEmpty();
+    }
+
+    @Test
+    void matrixBlockInstance_enabled_blankToken_degrades() {
+        StepVerifier.create(matrix(true, " ").blockInstance("evil.example"))
+                .assertNext(o -> {
+                    assertThat(o.result()).isEqualTo("degraded:no-admin-token");
+                    assertThat(o.isOk()).isFalse();
+                })
+                .verifyComplete();
     }
 
     // ---- akkoma (mastodon): WIRED — disabled is a no-op -----------------------------
