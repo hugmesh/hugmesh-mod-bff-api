@@ -2,9 +2,11 @@ package net.hugmesh.modbff.service;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.GrantedAuthority;
 import org.springframework.stereotype.Service;
+import org.springframework.web.reactive.function.client.WebClientResponseException;
 import reactor.core.publisher.Mono;
 import net.hugmesh.modbff.admin.AdminDomainLockClient;
 import net.hugmesh.modbff.admin.AdminSuspensionClient;
@@ -17,6 +19,9 @@ import net.hugmesh.modbff.audit.ModActionType;
 import net.hugmesh.modbff.external.BlockOutcome;
 import net.hugmesh.modbff.external.MastodonAdminClient;
 import net.hugmesh.modbff.external.MatrixAdminClient;
+import net.hugmesh.modbff.federation.FederationApiClient;
+import net.hugmesh.modbff.federation.ModerationRequestDto;
+import net.hugmesh.modbff.federation.SubmitModerationRequest;
 import net.hugmesh.modbff.model.PlatformKind;
 import net.hugmesh.modbff.model.ScopeKind;
 import net.hugmesh.modbff.notify.NotifyDirective;
@@ -25,9 +30,11 @@ import net.hugmesh.commons.security.DomainRegistry;
 import net.hugmesh.modbff.security.Roles;
 import net.hugmesh.commons.web.ApiException;
 
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -68,11 +75,27 @@ public class ModService {
     private final MatrixAdminClient matrix;
     private final MastodonAdminClient mastodon;
     private final OwncastModClient owncast;
+    /** federation-api client for the Matrix instance-block approval trail (decisions
+     *  84a-d); {@code null} only through the legacy 7-arg constructor. */
+    private final FederationApiClient federation;
 
+    /** federation-api {@code moderation_requests.kind} for a remote-instance block —
+     *  the exact vocabulary federation-api's {@code ModerationService.isKind} accepts and
+     *  that its {@code POST /recommend-instance-block} hardcodes for a user's own filing. */
+    static final String INSTANCE_BLOCK_KIND = "instance-block";
+    /** The two OPEN {@code moderation_requests} statuses (84a); {@code approved}/{@code denied} are closed. */
+    static final String STATUS_RECOMMENDED = "recommended";
+    static final String STATUS_REFERRED = "referred";
+    /** Per-call ceiling on each federation-api round trip made from the block path, so a
+     *  hung federation-api can never hang a Block click whose mod_action row is already
+     *  written — the leg reports {@code error} instead. */
+    static final Duration FEDERATION_CALL_TIMEOUT = Duration.ofSeconds(10);
+
+    @Autowired
     public ModService(AdminSuspensionClient suspensions, AdminDomainLockClient domainLocks,
                       CasdoorRoleClient roles, ModActionRepository audit,
                       MatrixAdminClient matrix, MastodonAdminClient mastodon,
-                      OwncastModClient owncast) {
+                      OwncastModClient owncast, FederationApiClient federation) {
         this.suspensions = suspensions;
         this.domainLocks = domainLocks;
         this.roles = roles;
@@ -80,6 +103,20 @@ public class ModService {
         this.matrix = matrix;
         this.mastodon = mastodon;
         this.owncast = owncast;
+        this.federation = federation;
+    }
+
+    /**
+     * Legacy constructor (pre decision 84) kept so existing hand-wired tests compile
+     * unchanged. Spring never uses it (the 8-arg constructor is {@code @Autowired}).
+     * With no {@link FederationApiClient} the Matrix instance-block leg reports
+     * {@code federation.status = not-configured} and files nothing.
+     */
+    public ModService(AdminSuspensionClient suspensions, AdminDomainLockClient domainLocks,
+                      CasdoorRoleClient roles, ModActionRepository audit,
+                      MatrixAdminClient matrix, MastodonAdminClient mastodon,
+                      OwncastModClient owncast) {
+        this(suspensions, domainLocks, roles, audit, matrix, mastodon, owncast, null);
     }
 
     // ── BAN (write access_suspension desired-state) ────────────────────
@@ -268,10 +305,169 @@ public class ModService {
             case null, default -> Mono.just(BlockOutcome.STUBBED);
         };
         String action = blockActionFor(platform, user);
+        boolean matrixInstance = !user && PlatformKind.MATRIX == PlatformKind.fromWire(platform);
         // Record the audit row after the external call resolves, then wrap into BlockResult.
+        // The mod_action row is written FIRST, so a Matrix instance block's federation-api
+        // leg (decisions 84a-d) can never cost the moderator their audited intent.
         return external.flatMap(outcome -> audit.record(actor, action, platform, target,
                         reason, outcome.result(), domain)
-                .map(recorded -> new BlockResult(recorded, outcome)));
+                .flatMap(recorded -> matrixInstance
+                        ? fileInstanceBlockRequest(target, reason)
+                                .map(filing -> new BlockResult(recorded, outcome, filing))
+                        : Mono.just(new BlockResult(recorded, outcome))));
+    }
+
+    // ── Matrix instance block → federation-api approval trail (decisions 84a-d) ──
+    /**
+     * Route a Matrix INSTANCE block into federation-api's {@code moderation_requests}
+     * submit → refer → decide trail (hugmesh-federation-api#7; the approved row is what
+     * hugmesh-generator#564's apply job will read). Operator answers, 2026-09-23:
+     * <ul>
+     *   <li><b>84a = B</b> — look first: list the OPEN rows ({@code recommended} AND
+     *       {@code referred}), keep those of kind {@code instance-block} whose target is
+     *       this domain, and file only when none is open. A user's own
+     *       {@code /recommend-instance-block} row counts as open and its id is reused.</li>
+     *   <li><b>84c = A</b> — the Block click IS the moderator's escalation: a fresh
+     *       filing is submit THEN refer (lands {@code referred}, moderator recorded as
+     *       referrer); an open row still {@code recommended} is referred; an open row
+     *       already {@code referred} is reused with no write.</li>
+     *   <li><b>84b = A</b> — every call carries the moderator's OWN token
+     *       ({@code BearerForwardingFilter}; no service identity). A 401 (a native-login
+     *       moderator whose Casdoor swap failed, or {@code app.bff-exchange} off) does NOT
+     *       fail the block: the mod_action row is already written and the result carries
+     *       {@code federation.status = unauthorized}.</li>
+     *   <li><b>84d = A</b> — the resulting {@code moderation_requests} id is surfaced as
+     *       its own response field ({@link BlockResult#body()}).</li>
+     * </ul>
+     * Never errors: every failure collapses to a {@link FederationFiling} naming it.
+     *
+     * <p>Known limits, stated rather than hidden: the look-then-file pair is not atomic
+     * (two moderators blocking the same domain in the same instant can each file — the
+     * duplicate-proof option was 84a = C, not chosen); and a SUPERADMIN's list spans every
+     * brand, so a superadmin block may reuse another brand's open row for the same domain.
+     */
+    private Mono<FederationFiling> fileInstanceBlockRequest(String target, String reason) {
+        if (federation == null) {
+            return Mono.just(FederationFiling.NOT_CONFIGURED);
+        }
+        return Mono.zip(openRows(STATUS_REFERRED, target), openRows(STATUS_RECOMMENDED, target))
+                .flatMap(open -> open.getT1().stream().findFirst()
+                        .map(referred -> Mono.just(FederationFiling.reused(referred)))
+                        .orElseGet(() -> open.getT2().stream().findFirst()
+                                .map(recommended -> referOpen(recommended.id(), FederationFiling.REFERRED_EXISTING))
+                                .orElseGet(() -> submitAndRefer(target, reason))))
+                .onErrorResume(e -> Mono.just(FederationFiling.failed(e, null)));
+    }
+
+    /** The open rows of one status for this domain's instance block, newest first
+     *  (federation-api orders by ts desc). */
+    private Mono<List<ModerationRequestDto>> openRows(String status, String target) {
+        String wanted = normaliseDomain(target);
+        return federation.listModeration(status)
+                .filter(r -> INSTANCE_BLOCK_KIND.equals(r.kind()) && status.equals(r.status())
+                        && r.id() != null && wanted.equals(normaliseDomain(r.target())))
+                .collectList()
+                .timeout(FEDERATION_CALL_TIMEOUT);
+    }
+
+    /** No open row: submit (lands {@code recommended}) THEN refer the new id (84c). */
+    private Mono<FederationFiling> submitAndRefer(String target, String reason) {
+        return federation.submitModeration(new SubmitModerationRequest(INSTANCE_BLOCK_KIND, target, reason))
+                .timeout(FEDERATION_CALL_TIMEOUT)
+                .flatMap(submitted -> submitted.id() == null
+                        ? Mono.just(FederationFiling.failed(new IllegalStateException("submit returned no id"), null))
+                        : referOpen(submitted.id(), FederationFiling.FILED));
+    }
+
+    /** Refer {@code id}; a refer failure keeps the id (the row exists, still {@code recommended}). */
+    private Mono<FederationFiling> referOpen(long id, String status) {
+        return federation.referModeration(id)
+                .timeout(FEDERATION_CALL_TIMEOUT)
+                .map(referred -> new FederationFiling(status, id, referred.status(), null))
+                .switchIfEmpty(Mono.fromSupplier(() -> FederationFiling.failed(
+                        new IllegalStateException("refer returned no body"), id)))
+                .onErrorResume(e -> Mono.just(FederationFiling.failed(e, id)));
+    }
+
+    /** Compare instance domains the way a person types them: trimmed, case-insensitive,
+     *  one trailing root dot ignored. {@code null} normalises to "" (never matches a real target). */
+    static String normaliseDomain(String domain) {
+        if (domain == null) return "";
+        String d = domain.trim().toLowerCase(Locale.ROOT);
+        return d.endsWith(".") ? d.substring(0, d.length() - 1) : d;
+    }
+
+    /**
+     * What happened to the federation-api leg of a Matrix instance block. {@code status}:
+     * <ul>
+     *   <li>{@code filed} — no open row existed; submitted and referred (new id);</li>
+     *   <li>{@code referred-existing} — an open {@code recommended} row (e.g. a user's own
+     *       recommendation) was referred; its id is reused;</li>
+     *   <li>{@code existing} — an open row was already {@code referred}; reused, no write;</li>
+     *   <li>{@code unauthorized} — federation-api answered 401 to the moderator's token;</li>
+     *   <li>{@code error} — any other failure (non-2xx, timeout, unreachable);</li>
+     *   <li>{@code not-configured} — no federation-api client wired (legacy constructor).</li>
+     * </ul>
+     * {@code moderationRequestId} is kept whenever a row is known to exist, including a
+     * submit that succeeded before its refer failed ({@code requestStatus} then says
+     * {@code recommended}).
+     */
+    public record FederationFiling(String status, Long moderationRequestId, String requestStatus,
+                                   Integer httpStatus) {
+
+        public static final String FILED = "filed";
+        public static final String REFERRED_EXISTING = "referred-existing";
+        public static final String EXISTING = "existing";
+        public static final String UNAUTHORIZED = "unauthorized";
+        public static final String ERROR = "error";
+        static final FederationFiling NOT_CONFIGURED = new FederationFiling("not-configured", null, null, null);
+
+        static FederationFiling reused(ModerationRequestDto referred) {
+            return new FederationFiling(EXISTING, referred.id(), referred.status(), null);
+        }
+
+        static FederationFiling failed(Throwable e, Long knownId) {
+            Integer http = e instanceof WebClientResponseException w ? w.getStatusCode().value() : null;
+            String status = http != null && http == 401 ? UNAUTHORIZED : ERROR;
+            log.warn("[block] federation-api moderation-request leg {} (id={}): {}", status, knownId, e.toString());
+            return new FederationFiling(status, knownId, knownId == null ? null : STATUS_RECOMMENDED, http);
+        }
+
+        /** The machine-readable {@code federation} object of the block response. */
+        Map<String, Object> body() {
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("status", status);
+            out.put("moderationRequestId", moderationRequestId);
+            out.put("requestStatus", requestStatus);
+            if (httpStatus != null) out.put("httpStatus", httpStatus);
+            return out;
+        }
+
+        /** The sentence appended to the human {@code note}. */
+        String note() {
+            return switch (status) {
+                case FILED -> " Filed federation moderation request #" + moderationRequestId
+                        + " and referred it to administrators for a decision.";
+                case REFERRED_EXISTING -> " An open recommendation for this domain already existed (#"
+                        + moderationRequestId + "); it has now been referred to administrators.";
+                case EXISTING -> " Federation moderation request #" + moderationRequestId
+                        + " for this domain is already referred to administrators; nothing new was filed.";
+                case UNAUTHORIZED -> " The federation moderation request was NOT filed: federation-api "
+                        + "rejected your sign-in token (401). This happens for a moderator signed in through "
+                        + "the platform's own login when the Casdoor token exchange failed or is switched off "
+                        + "(app.bff-exchange). The block is still recorded here; file it from the moderation "
+                        + "queue after signing in through Casdoor."
+                        + (moderationRequestId == null ? "" : " Request #" + moderationRequestId
+                                + " was created but not referred.");
+                case ERROR -> " The federation moderation request could not be completed ("
+                        + (httpStatus == null ? "federation-api unreachable or timed out" : "HTTP " + httpStatus)
+                        + ")"
+                        + (moderationRequestId == null ? "; nothing was filed" : "; request #"
+                                + moderationRequestId + " exists but was not referred")
+                        + ". The block is still recorded here.";
+                default -> " No federation moderation request was filed (federation-api client not configured).";
+            };
+        }
     }
 
     /**
@@ -706,18 +902,33 @@ public class ModService {
      * a STUBBED / degraded / breaker-open outcome did NOT land the homeserver effect so it
      * returns {@code 202 pending-reconcile}.
      */
-    public record BlockResult(ModAction action, BlockOutcome outcome) {
+    public record BlockResult(ModAction action, BlockOutcome outcome, FederationFiling federation) {
 
-        /** The HTTP body the controller returns (200 when applied, else 202 pending). */
+        /** A block with no federation-api leg (every block except a Matrix instance block). */
+        public BlockResult(ModAction action, BlockOutcome outcome) {
+            this(action, outcome, null);
+        }
+
+        /** The HTTP body the controller returns (200 when applied, else 202 pending).
+         *  {@code moderationRequestId} (decision 84d) is always present — the federation-api
+         *  {@code moderation_requests} id, or {@code null} when no row exists; a Matrix
+         *  instance block additionally carries the {@code federation} leg's outcome. */
         public Map<String, Object> body() {
             boolean applied = outcome.isOk();
             Map<String, Object> out = new LinkedHashMap<>();
             out.put("state", applied ? "blocked" : "pending-reconcile");
             out.put("external", outcome.result());
             out.put("blocked", action);
+            out.put("moderationRequestId", federation == null ? null : federation.moderationRequestId());
+            if (federation != null) {
+                out.put("federation", federation.body());
+            }
             if (outcome.isStubbed()) {
+                // With a federation leg the row is NOT local-only — the federation sentence
+                // appended below says where it went, so the prose must not contradict it.
                 out.put("note", "external homeserver admin call is STUBBED (integration disabled) — "
-                        + "action recorded in the local audit table only; no homeserver effect was applied");
+                        + (federation == null ? "action recorded in the local audit table only; " : "")
+                        + "no homeserver effect was applied");
             } else if (outcome.isPosted()) {
                 out.put("note", "deactivate command posted to the tuwunel admin room (" + outcome.result()
                         + ") — the admin bot applies it asynchronously and its reply is not yet correlated; "
@@ -733,6 +944,9 @@ public class ModService {
                         + "forbidden_remote_server_names config edit, a GitOps reconcile, and a homeserver "
                         + "restart. This mod_action row is the durable, visible record of the request; "
                         + "requested, applied by an administrator (operator decision 50, 2026-09-18)");
+            }
+            if (federation != null) {
+                out.merge("note", federation.note().trim(), (prior, extra) -> prior + " " + extra);
             }
             return out;
         }

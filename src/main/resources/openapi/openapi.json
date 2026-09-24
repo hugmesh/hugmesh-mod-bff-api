@@ -508,7 +508,7 @@
             }
           },
           "202" : {
-            "description" : "Pending-reconcile — homeserver call STUBBED/degraded; action audited",
+            "description" : "Pending-reconcile — homeserver call STUBBED/degraded/requested; action audited. Every block body carries moderationRequestId (the federation-api moderation_requests id, null when none). A Matrix INSTANCE block also carries federation {status: filed|referred-existing|existing|unauthorized|error|not-configured, moderationRequestId, requestStatus, httpStatus?} — it looks for an open instance-block request for the domain, files and refers one only when none is open, and never fails the block when federation-api refuses (401) or errs",
             "content" : {
               "application/json" : {
                 "schema" : {
