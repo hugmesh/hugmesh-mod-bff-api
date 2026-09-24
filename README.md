@@ -131,7 +131,7 @@ resource-server filter chain path rule, and `@PreAuthorize` on every method.
 | `/bff/mod/moderation` | GET | List the federation moderation queue (`?status=`) | **federation-api** |
 | `/bff/mod/moderation` | POST | Record a recommendation (user→mod chain middle step) | **federation-api** + audit |
 | `/bff/mod/moderation/{id}/refer` | POST | **Refer / escalate** a request UP to an admin | **federation-api** + audit |
-| `/bff/mod/block` | POST | Server-wide block a user/instance on Matrix/Mastodon | Matrix user → **REVERSIBLE domain-lock** (decision 51, not the homeserver) · Matrix instance → **REQUEST recorded**, not applied (decision 50) · akkoma ✅ wired, dark — homeserver call | + audit |
+| `/bff/mod/block` | POST | Server-wide block a user/instance on Matrix/Mastodon | Matrix user → **REVERSIBLE domain-lock** (decision 51, not the homeserver) · Matrix instance → **REQUEST recorded**, not applied (decision 50), and filed into federation-api's approval trail (decisions 84a-d; `moderationRequestId` in the body) · akkoma ✅ wired, dark — homeserver call | + audit |
 | `/bff/mod/ban` | POST | **Ban** a user from a platform-access role (writes desired-state) | **admin-bff** + audit |
 | `/bff/mod/ban` | DELETE | **Lift** a previously written ban | **admin-bff** + audit |
 | `/bff/mod/domain-lock/{role}/{user}` | POST | **Domain-lock** a user (force local-only / no-federation) | **admin-bff** + audit |
