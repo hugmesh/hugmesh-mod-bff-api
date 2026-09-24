@@ -209,7 +209,11 @@ public class ModController {
             summary = "Block a user/instance server-wide on Matrix/Mastodon (external STUBBED → 202 pending, locally audited).")
     @ApiResponses({
             @ApiResponse(responseCode = "200", description = "Block applied on the homeserver (real OK)"),
-            @ApiResponse(responseCode = "202", description = "Pending-reconcile — homeserver call STUBBED/degraded; action audited"),
+            @ApiResponse(responseCode = "202", description = "Pending-reconcile — homeserver call STUBBED/degraded/requested; action audited. "
+                    + "Every block body carries moderationRequestId (the federation-api moderation_requests id, null when none). "
+                    + "A Matrix INSTANCE block also carries federation {status: filed|referred-existing|existing|unauthorized|error|not-configured, "
+                    + "moderationRequestId, requestStatus, httpStatus?} — it looks for an open instance-block request for the domain, "
+                    + "files and refers one only when none is open, and never fails the block when federation-api refuses (401) or errs"),
             @ApiResponse(responseCode = "400", description = "Validation failed — invalid platform/scope/target", content = @Content),
             @ApiResponse(responseCode = "401", description = "Unauthenticated", content = @Content),
             @ApiResponse(responseCode = "403", description = "Caller lacks ROLE_MOD or ROLE_ADMIN, step-up MFA is required but not satisfied, or target is privileged / cross-tenant", content = @Content,
