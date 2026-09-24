@@ -754,10 +754,11 @@ initContainer) and the generator-owned deployment requirement.
     synchronously succeed) rather than attempting anything, and stays wired the same
     way it always was (`matrix.blockInstance`, unaffected by decision 51 since it
     never routed through the deactivate transport). Turning that request into the
-    `forbidden_remote_server_names` config edit is a separate admin/GitOps job, out
-    of scope for this repo — hugmesh-federation-api#7 (the moderation-queue entry)
-    and hugmesh-generator#564 (the apply job), both cross-linked from
-    hugmesh-mod-bff-api#1. The generator egress NetworkPolicy remains the
+    `forbidden_remote_server_names` config edit is a separate admin/GitOps job:
+    since operator decisions 84a-d (2026-09-23) this BFF files the
+    moderation-queue entry itself (hugmesh-federation-api#7 — see *Matrix
+    instance-block → federation-api approval trail* below), and the apply job is
+    hugmesh-generator#564, both cross-linked from hugmesh-mod-bff-api#1. The generator egress NetworkPolicy remains the
     authoritative backstop meanwhile. **The MOD path is now reversible end to end
     for a Matrix user block** — `MatrixBlockIsOneWayTest` pins the new contract
     (block, then `domain-unlock`, is a genuine round trip); it no longer pins the
@@ -891,17 +892,28 @@ work as done:
   `tuwunel-admin` into this pod. The akkoma/Mastodon leg is **already wired** (✅,
   dark by default, unaffected by decision 51) and only awaits live verification
   against a real akkoma instance — it is no longer a deferred follow-up.
-- 🔭 **Matrix instance-block → applied config edit (decision 50), split across
-  two other repos.** `POST /bff/mod/block {platform:matrix, scope:instance}`
-  durably records the moderator's intent (`requested:no-tuwunel-verb`) but nothing
-  yet turns that into the `forbidden_remote_server_names` config edit + GitOps
-  reconcile + homeserver restart tuwunel actually needs. Two follow-up issues,
-  deliberately NOT built from this repo: hugmesh-federation-api#7 (route the
-  request into the existing submit→refer→decide moderation-approval trail, whose
-  javadoc already describes an approved `instance-block` as exactly this
-  authorisation signal) and hugmesh-generator#564 (the reconciler Job that applies
-  an approved decision, mirroring the existing `akkoma/domainlock-sync-job.yaml`
-  pattern). The generator egress NetworkPolicy remains the backstop meanwhile.
+- ✅ **Matrix instance-block → federation-api approval trail (decisions 84a-d,
+  hugmesh-federation-api#7).** `POST /bff/mod/block {platform:matrix, scope:instance}`
+  durably records the moderator's intent (`requested:no-tuwunel-verb`) FIRST, then
+  files it into federation-api's submit→refer→decide trail with the moderator's own
+  token: it lists the OPEN (`recommended` + `referred`) `instance-block` rows for the
+  same domain (trimmed, case-insensitive, one root dot ignored) and reuses one if it
+  exists — a `referred` row as-is, a `recommended` one (e.g. a user's own
+  `/recommend-instance-block`) by referring it — else submits and refers a new row.
+  The reason sent to federation-api is clipped to its 1024-char limit (the mod_action
+  row keeps the full text). A 401 or any other federation failure never fails the
+  block: the 202 body carries `moderationRequestId` (null when no row exists) and a
+  `federation` object `{status: filed|referred-existing|existing|unauthorized|error,
+  moderationRequestId, requestStatus, httpStatus?}`. Known limits: the look-then-file
+  pair is not atomic (two simultaneous blocks can each file), and a SUPERADMIN's list
+  spans brands, so a superadmin block can reuse another brand's open row. Pinned by
+  `MatrixInstanceBlockFederationTest`; the live round trip awaits a running mesh.
+- 🔭 **Matrix instance-block → applied config edit (decision 50).** Nothing yet
+  turns an APPROVED `instance-block` request into the `forbidden_remote_server_names`
+  config edit + GitOps reconcile + homeserver restart tuwunel actually needs:
+  hugmesh-generator#564 (the reconciler Job, mirroring the existing
+  `akkoma/domainlock-sync-job.yaml` pattern). The generator egress NetworkPolicy
+  remains the backstop meanwhile.
 - 🔭 **Casdoor MFA step-up — the CHALLENGE half.** The mod-bff **enforcement** half is
   ✅ shipped and documented above (*Step-up MFA on sensitive write-effects*): ban / lift
   / domain-lock / unlock / block require the `MFA_SATISFIED` marker when

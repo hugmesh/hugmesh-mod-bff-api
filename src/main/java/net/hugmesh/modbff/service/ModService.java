@@ -90,6 +90,11 @@ public class ModService {
      *  hung federation-api can never hang a Block click whose mod_action row is already
      *  written — the leg reports {@code error} instead. */
     static final Duration FEDERATION_CALL_TIMEOUT = Duration.ofSeconds(10);
+    /** federation-api {@code SubmitRequest.reason} is {@code @Size(max = 1024)} while a
+     *  block reason may be up to 2048 ({@code BlockRequest}); a longer reason is clipped
+     *  on the federation leg ONLY (the mod_action row keeps the full text), so a valid
+     *  block can never earn a 400 that files nothing. */
+    static final int FEDERATION_REASON_MAX = 1024;
 
     @Autowired
     public ModService(AdminSuspensionClient suspensions, AdminDomainLockClient domainLocks,
@@ -356,6 +361,10 @@ public class ModService {
                         .orElseGet(() -> open.getT2().stream().findFirst()
                                 .map(recommended -> referOpen(recommended.id(), FederationFiling.REFERRED_EXISTING))
                                 .orElseGet(() -> submitAndRefer(target, reason))))
+                // An empty completion anywhere on the leg (e.g. a 2xx submit with no body)
+                // must still yield a result, or the block would answer a bodiless 200.
+                .switchIfEmpty(Mono.fromSupplier(() -> FederationFiling.failed(
+                        new IllegalStateException("federation-api returned no body"), null)))
                 .onErrorResume(e -> Mono.just(FederationFiling.failed(e, null)));
     }
 
@@ -372,7 +381,8 @@ public class ModService {
 
     /** No open row: submit (lands {@code recommended}) THEN refer the new id (84c). */
     private Mono<FederationFiling> submitAndRefer(String target, String reason) {
-        return federation.submitModeration(new SubmitModerationRequest(INSTANCE_BLOCK_KIND, target, reason))
+        return federation.submitModeration(new SubmitModerationRequest(INSTANCE_BLOCK_KIND, target,
+                        clipReason(reason)))
                 .timeout(FEDERATION_CALL_TIMEOUT)
                 .flatMap(submitted -> submitted.id() == null
                         ? Mono.just(FederationFiling.failed(new IllegalStateException("submit returned no id"), null))
@@ -387,6 +397,16 @@ public class ModService {
                 .switchIfEmpty(Mono.fromSupplier(() -> FederationFiling.failed(
                         new IllegalStateException("refer returned no body"), id)))
                 .onErrorResume(e -> Mono.just(FederationFiling.failed(e, id)));
+    }
+
+    /** Fit a block reason into federation-api's {@code reason} limit: unchanged when it
+     *  fits, else cut to {@link #FEDERATION_REASON_MAX} chars ending in an ellipsis, never
+     *  splitting a surrogate pair. */
+    static String clipReason(String reason) {
+        if (reason == null || reason.length() <= FEDERATION_REASON_MAX) return reason;
+        int cut = FEDERATION_REASON_MAX - 1;
+        if (Character.isHighSurrogate(reason.charAt(cut - 1))) cut--;
+        return reason.substring(0, cut) + "\u2026";
     }
 
     /** Compare instance domains the way a person types them: trimmed, case-insensitive,

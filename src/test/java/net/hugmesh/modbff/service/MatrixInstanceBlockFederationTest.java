@@ -288,6 +288,154 @@ class MatrixInstanceBlockFederationTest {
                 .verify(Duration.ofSeconds(5));
     }
 
+    @Test
+    void hungSubmit_timesOut_blockStillAnswers_nothingReferred() {
+        when(federation.submitModeration(any())).thenReturn(Mono.never());
+
+        StepVerifier.withVirtualTime(() -> service.block("matrix", "instance", DOMAIN, "abuse", mod()))
+                .thenAwait(ModService.FEDERATION_CALL_TIMEOUT.plus(Duration.ofSeconds(1)))
+                .assertNext(r -> {
+                    assertThat(fed(r)).containsEntry("status", "error").doesNotContainKey("httpStatus");
+                    assertThat(r.body().get("moderationRequestId")).isNull();
+                })
+                .expectComplete()
+                .verify(Duration.ofSeconds(5));
+        verify(federation, never()).referModeration(anyLong());
+    }
+
+    @Test
+    void hungRefer_timesOut_keepsTheNewId() {
+        when(federation.submitModeration(any()))
+                .thenReturn(Mono.just(req(61, "instance-block", DOMAIN, "recommended")));
+        when(federation.referModeration(61L)).thenReturn(Mono.never());
+
+        StepVerifier.withVirtualTime(() -> service.block("matrix", "instance", DOMAIN, "abuse", mod()))
+                .thenAwait(ModService.FEDERATION_CALL_TIMEOUT.plus(Duration.ofSeconds(1)))
+                .assertNext(r -> {
+                    assertThat(r.body().get("moderationRequestId")).isEqualTo(61L);
+                    assertThat(fed(r)).containsEntry("status", "error")
+                            .containsEntry("requestStatus", "recommended");
+                })
+                .expectComplete()
+                .verify(Duration.ofSeconds(5));
+    }
+
+    /** Only a 401 means "your sign-in token was refused"; a 403 (or a 400) is a plain error
+     *  and must not tell the moderator to re-sign-in through Casdoor. */
+    @Test
+    void federation403_isError_notUnauthorized() {
+        when(federation.submitModeration(any())).thenReturn(Mono.error(WebClientResponseException.create(
+                403, "Forbidden", null, "".getBytes(StandardCharsets.UTF_8), StandardCharsets.UTF_8)));
+
+        StepVerifier.create(service.block("matrix", "instance", DOMAIN, "abuse", mod()))
+                .assertNext(r -> {
+                    assertThat(fed(r)).containsEntry("status", "error").containsEntry("httpStatus", 403);
+                    assertThat(r.body().get("note").toString()).contains("HTTP 403").doesNotContain("401");
+                })
+                .verifyComplete();
+        verify(federation, never()).referModeration(anyLong());
+    }
+
+    @Test
+    void openRowWithNoId_isIgnored_andAFreshRequestIsFiled() {
+        when(federation.listModeration("referred")).thenReturn(Flux.just(
+                new ModerationRequestDto(null, "u:x", "instance-block", DOMAIN, "spam", "referred",
+                        "mod:alice", null, Instant.parse("2026-09-23T00:00:00Z"))));
+        when(federation.submitModeration(any()))
+                .thenReturn(Mono.just(req(71, "instance-block", DOMAIN, "recommended")));
+        when(federation.referModeration(71L)).thenReturn(Mono.just(req(71, "instance-block", DOMAIN, "referred")));
+
+        StepVerifier.create(service.block("matrix", "instance", DOMAIN, "abuse", mod()))
+                .assertNext(r -> {
+                    assertThat(r.body().get("moderationRequestId")).isEqualTo(71L);
+                    assertThat(fed(r)).containsEntry("status", "filed");
+                })
+                .verifyComplete();
+    }
+
+    @Test
+    void submitReturningNoId_isError_andNothingIsReferred() {
+        when(federation.submitModeration(any())).thenReturn(Mono.just(
+                new ModerationRequestDto(null, "mod:bob", "instance-block", DOMAIN, "abuse", "recommended",
+                        null, null, null)));
+
+        StepVerifier.create(service.block("matrix", "instance", DOMAIN, "abuse", mod()))
+                .assertNext(r -> {
+                    assertThat(fed(r)).containsEntry("status", "error");
+                    assertThat(r.body().get("moderationRequestId")).isNull();
+                })
+                .verifyComplete();
+        verify(federation, never()).referModeration(anyLong());
+    }
+
+    /** A 2xx submit with no body must still produce a block result — without it the whole
+     *  block Mono completed EMPTY and WebFlux answered a bodiless 200. */
+    @Test
+    void submitReturningNoBody_blockStillEmitsAResult() {
+        when(federation.submitModeration(any())).thenReturn(Mono.empty());
+
+        StepVerifier.create(service.block("matrix", "instance", DOMAIN, "abuse", mod()))
+                .assertNext(r -> {
+                    assertThat(r.body().get("state")).isEqualTo("pending-reconcile");
+                    assertThat(fed(r)).containsEntry("status", "error");
+                    assertThat(r.body().get("moderationRequestId")).isNull();
+                })
+                .verifyComplete();
+        verify(federation, never()).referModeration(anyLong());
+    }
+
+    @Test
+    void referReturningNoBody_isError_keepsTheId() {
+        when(federation.listModeration("recommended"))
+                .thenReturn(Flux.just(req(33, "instance-block", DOMAIN, "recommended")));
+        when(federation.referModeration(33L)).thenReturn(Mono.empty());
+
+        StepVerifier.create(service.block("matrix", "instance", DOMAIN, "abuse", mod()))
+                .assertNext(r -> {
+                    assertThat(r.body().get("moderationRequestId")).isEqualTo(33L);
+                    assertThat(fed(r)).containsEntry("status", "error")
+                            .containsEntry("requestStatus", "recommended");
+                })
+                .verifyComplete();
+    }
+
+    /** BlockRequest allows a 2048-char reason; federation-api SubmitRequest caps it at 1024.
+     *  The federation leg gets a clipped reason; the mod_action row keeps the full text. */
+    @Test
+    void overlongReason_isClippedOnTheFederationLegOnly() {
+        String longReason = "r".repeat(1500);
+        when(federation.submitModeration(any()))
+                .thenReturn(Mono.just(req(81, "instance-block", DOMAIN, "recommended")));
+        when(federation.referModeration(81L)).thenReturn(Mono.just(req(81, "instance-block", DOMAIN, "referred")));
+
+        StepVerifier.create(service.block("matrix", "instance", DOMAIN, longReason, mod()))
+                .assertNext(r -> assertThat(fed(r)).containsEntry("status", "filed"))
+                .verifyComplete();
+
+        org.mockito.ArgumentCaptor<SubmitModerationRequest> sent =
+                org.mockito.ArgumentCaptor.forClass(SubmitModerationRequest.class);
+        verify(federation).submitModeration(sent.capture());
+        assertThat(sent.getValue().reason()).hasSize(ModService.FEDERATION_REASON_MAX)
+                .startsWith("r".repeat(1000)).endsWith("\u2026");
+        verify(audit).record(anyString(), anyString(), anyString(), anyString(),
+                org.mockito.ArgumentMatchers.eq(longReason), anyString(), anyString());
+    }
+
+    @Test
+    void clipReason_boundaries() {
+        String exact = "x".repeat(ModService.FEDERATION_REASON_MAX);
+        assertThat(ModService.clipReason(exact)).isSameAs(exact);
+        assertThat(ModService.clipReason(null)).isNull();
+        assertThat(ModService.clipReason("x".repeat(ModService.FEDERATION_REASON_MAX + 1)))
+                .hasSize(ModService.FEDERATION_REASON_MAX).endsWith("\u2026");
+        // A surrogate pair straddling the cut is dropped whole, never split.
+        String emoji = "\uD83D\uDE00";
+        String straddle = "x".repeat(ModService.FEDERATION_REASON_MAX - 2) + emoji + "tail";
+        String clipped = ModService.clipReason(straddle);
+        assertThat(clipped.length()).isLessThanOrEqualTo(ModService.FEDERATION_REASON_MAX);
+        assertThat(Character.isHighSurrogate(clipped.charAt(clipped.length() - 2))).isFalse();
+    }
+
     // ── 84d: the dedicated id field; only the Matrix INSTANCE leg files anything ──
 
     @Test
