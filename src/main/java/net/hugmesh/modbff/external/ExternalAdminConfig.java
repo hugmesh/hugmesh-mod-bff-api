@@ -6,13 +6,16 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.web.reactive.function.client.WebClient;
 
 /**
- * Wires the reactive {@link MatrixAdminClient} (tuwunel) + {@link MastodonAdminClient}
- * (akkoma) on their own {@link WebClient}s pointed at the in-cluster homeservers.
- * Base URLs default to the in-cluster service DNS grounded in the
- * hugmesh-generator manifests (tuwunel :8008, akkoma :4000) and are overridable
- * per env. The akkoma (Mastodon) leg is WIRED to the confirmed pleroma-admin verbs;
- * the tuwunel (Matrix) leg is WIRED to the admin-room {@code !admin users deactivate}
- * command transport for block-user (posted, never ok — see {@link MatrixAdminClient}).
+ * Wires the reactive {@link MastodonAdminClient} (akkoma) on its own {@link WebClient}
+ * pointed at the in-cluster homeserver (base URL defaults to the in-cluster service DNS
+ * grounded in the hugmesh-generator manifests, akkoma :4000, overridable per env), plus
+ * the {@link MatrixAdminClient} (tuwunel). The akkoma (Mastodon) leg is WIRED to the
+ * confirmed pleroma-admin verbs. The tuwunel (Matrix) leg issues no HTTP at all: its only
+ * verb is the instance block, recorded as a REQUEST because tuwunel has no runtime
+ * federation-block verb, and its one-way user deactivate moved to hugmesh-admin-bff-api
+ * (decision 83b, hugmesh-mod-bff-api#23), so it needs no WebClient, base URL, server name
+ * or admin room. The {@code external.matrix.base-url} / {@code server-name} /
+ * {@code admin-room} keys stay in {@code application.yml} but nothing here reads them.
  * Both {@code enabled} flags default false so a homeserver-less dev/test run boots
  * clean and merging is inert. Admin bearers are sourced from Vault via ESO —
  * {@code external.mastodon.admin-token} from {@code hugmesh/akkoma-admin},
@@ -26,18 +29,12 @@ public class ExternalAdminConfig {
 
     @Bean
     MatrixAdminClient matrixAdminClient(
-            WebClient.Builder builder,
-            @Value("${external.matrix.base-url:http://tuwunel.hugmesh-backend.svc.cluster.local:8008}")
-            String baseUrl,
             @Value("${external.matrix.enabled:false}") boolean enabled,
-            // privileged admin-room member token from Vault hugmesh/tuwunel-admin (property
-            // "token") via ESO secret tuwunel-admin — placeholder/empty default, never inlined.
-            @Value("${external.matrix.admin-token:}") String adminToken,
-            // the homeserver server_name (tuwunel.toml) — qualifies a bare localpart target.
-            @Value("${external.matrix.server-name:hugmesh.net}") String serverName,
-            // the admin room alias (tuwunel.toml admin_room_default), resolved + cached.
-            @Value("${external.matrix.admin-room:#admins:hugmesh.net}") String adminRoom) {
-        return new MatrixAdminClient(builder.baseUrl(baseUrl).build(), enabled, adminToken, serverName, adminRoom);
+            // tuwunel-admin token from Vault hugmesh/tuwunel-admin (property "token") via ESO
+            // secret tuwunel-admin — placeholder/empty default, never inlined. Only its
+            // presence is checked (blank => degraded:no-admin-token); nothing is sent with it.
+            @Value("${external.matrix.admin-token:}") String adminToken) {
+        return new MatrixAdminClient(enabled, adminToken);
     }
 
     @Bean

@@ -23,9 +23,9 @@ import java.time.LocalDateTime;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 /**
@@ -49,19 +49,20 @@ import static org.mockito.Mockito.when;
  *       {@link AdminDomainLockClient#unlock}, which is the exact undo of the {@code lock}
  *       call the block issued — so "block, then domain-unlock" is a real round trip, not
  *       a door with no handle on the other side;</li>
- *   <li>the deactivate transport ({@link MatrixAdminClient#blockUser},
- *       {@code DEACTIVATE_COMMAND}) is UNCHANGED (kept for a future ADMIN-only path with
- *       its own explicit confirmation — none exists yet, hugmesh-mod-bff-api#23) but is
- *       now UNREACHABLE from the MOD block surface: nothing in {@link ModService} calls
- *       it any more, for any platform/scope/role combination reachable from
- *       {@code ModController}. {@code MatrixAdminClient} still exposes no
- *       un-block/activate verb either, so the transport that DOES exist could not be
- *       made reversible even if something started calling it again.</li>
+ *   <li>the only thing {@link ModService} ever asks of {@link MatrixAdminClient} is
+ *       {@code blockInstance} (decision 50's REQUEST), for any platform/scope/role
+ *       combination reachable from {@code ModController}. The deactivate transport this
+ *       class used to guard ({@code MatrixAdminClient.blockUser} +
+ *       {@code DEACTIVATE_COMMAND}) no longer exists in this service: decision 83b
+ *       (2026-09-23) moved the ADMIN-only deactivate to hugmesh-admin-bff-api behind a
+ *       propose/confirm pair (hugmesh-admin-bff-api#115), and
+ *       {@code MatrixAdminClientNoUserDeactivateTest} pins that it stays gone
+ *       (hugmesh-mod-bff-api#23).</li>
  * </ul>
  *
  * <p><b>This test asserts the CURRENT state, it does not endorse it as the end state.</b>
- * If it ever goes red because {@link MatrixAdminClient#blockUser} became reachable again
- * from {@link ModService}, that is the point: routing MOD traffic back onto the
+ * If it ever goes red because {@link ModService} started asking {@link MatrixAdminClient}
+ * for anything but an instance block, that is the point: routing MOD traffic onto an
  * irreversible transport is exactly what decision 51 forbade — it would need a new
  * decision (or a genuine, confirmation-gated ADMIN path), not a quiet revert. Neither
  * this test nor its predecessor is primary evidence against a live tuwunel — no run has
@@ -109,7 +110,6 @@ class MatrixBlockIsOneWayTest {
                 .thenReturn(Mono.just(new ModActionRepository.RecordedBan(row("access.restore"), true)));
         when(audit.record(anyString(), anyString(), anyString(), anyString(), any(), anyString(), anyString()))
                 .thenReturn(Mono.just(row("matrix.block-user")));
-        when(matrix.blockUser(anyString())).thenReturn(Mono.just(BlockOutcome.STUBBED));
         when(matrix.blockInstance(anyString())).thenReturn(Mono.just(BlockOutcome.requested("no-tuwunel-verb")));
     }
 
@@ -125,9 +125,9 @@ class MatrixBlockIsOneWayTest {
         verifyNoInteractions(matrix);
     }
 
-    /** The DEACTIVATE transport specifically ({@code blockUser}, the irreversible verb) is
-     *  unreachable from the MOD path: nothing ModService can be asked to do (block on
-     *  either scope, lift, domainLock, domainUnlock) calls it. block-INSTANCE is
+    /** Nothing ModService can be asked to do (block on either scope, lift, domainLock,
+     *  domainUnlock) reaches the Matrix client except the instance block; the former
+     *  deactivate verb ({@code blockUser}) is gone (decision 83b). block-INSTANCE is
      *  untouched by decision 51 (it is decision 50's territory — see
      *  {@code ExternalAdminClientTest}) and legitimately still calls
      *  {@code matrix.blockInstance}. */
@@ -144,8 +144,8 @@ class MatrixBlockIsOneWayTest {
                 .expectNextCount(1).verifyComplete();
         StepVerifier.create(service.domainUnlock("ROLE_MATRIX_DOMAINLOCKED", "alice", null, mod))
                 .expectNextCount(1).verifyComplete();
-        verify(matrix, never()).blockUser(anyString());
         verify(matrix).blockInstance("evil.example");
+        verifyNoMoreInteractions(matrix);
     }
 
     /** Reversibility end to end: the SAME target's block (domain-lock WRITE) and a
