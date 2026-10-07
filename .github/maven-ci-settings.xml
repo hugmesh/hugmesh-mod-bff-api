@@ -1,0 +1,140 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  CI-ONLY Maven settings for a CONSUMER of the GitHub Packages publish chain
+  (hugmesh-build-config -> hugmesh-parent -> hugmesh-commons -> hugmesh-auth-core).
+  Passed explicitly with `-s .github/maven-ci-settings.xml` by the image build (the
+  Dockerfile, when the BuildKit secret `packages_read_token` is present) and by the GitHub
+  release workflow, and by NOTHING else. Identical bytes in every BFF/service repo; modelled
+  on hugmesh-auth-core/.github/maven-ci-settings.xml minus everything a consumer does not
+  need (no `github` deploy server: a consumer builds an image, it does not publish a jar).
+
+  WHY THIS IS A SECOND FILE AND NOT AN EDIT OF settings.xml
+  =========================================================
+  The committed repo-root settings.xml points at the in-cluster GitLab group registry
+  (${env.CI_API_V4_URL}/groups/${env.GITLAB_GROUP_ID}/-/packages/maven, Job-Token header).
+  That is the contract of the GitLab pipeline AND of the local compose / kind lane
+  (hugmesh-generator scripts/patch-stack-src.sh greps it for CI_API_V4_URL and injects an
+  http-blocker mirror; tests/stack/m2-bootstrap.sh serves the artifacts from a local m2
+  registry). From GitHub that GitLab is unreachable, so a GitHub build needs a different
+  settings file, and an additive one leaves the other lanes byte-identical.
+
+  The file is mirrors-free on purpose: do not copy the http-blocker <mirror> the local lane
+  injects into settings.xml; GitHub Packages is HTTPS and a stray mirror would hide it.
+
+  WHY PACKAGES_READ_TOKEN AND NOT THE WORKFLOW'S GITHUB_TOKEN
+  ===========================================================
+  maven.pkg.github.com requires authentication even to READ, and every repo in the chain is
+  private. The automatic GITHUB_TOKEN is scoped to the repository whose workflow runs, so it
+  cannot read a sibling repository's package. The supported route (decision 90a=B,
+  hugmesh-auth-core/RELEASING.md 6.1/6.2) is a classic PAT with read:packages stored as the
+  PACKAGES_READ_TOKEN secret (optional PACKAGES_READ_ACTOR). While the repos are private on
+  the Free plan that has to be a REPOSITORY secret on each consumer repo; an org secret only
+  works once the org is upgraded or the repos are public. The workflow passes it in as the
+  BuildKit secret `packages_read_token`; the Dockerfile exports it as UPSTREAM_PACKAGES_TOKEN
+  for one RUN and never persists it.
+
+  BOTH <repositories> AND <pluginRepositories>
+  ============================================
+  net.hugmesh:hugmesh-build-config is not a project dependency: hugmesh-parent adds it to
+  the PMD / Checkstyle / SpotBugs plugin <dependencies>, and Maven resolves a plugin's
+  dependencies from the PLUGIN repositories. `package -DskipTests` does not reach those
+  analysers (they are bound to `verify`), but any job that runs `verify` does, so all four
+  upstreams are declared in both lists. GitHub Packages is per-repository
+  (https://maven.pkg.github.com/<owner>/<repo>), so each upstream is its own URL and its own
+  <server> id.
+
+  NO SECRET IS COMMITTED HERE. The actor and token arrive as UPSTREAM_PACKAGES_ACTOR and
+  UPSTREAM_PACKAGES_TOKEN in the environment.
+-->
+<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 http://maven.apache.org/xsd/settings-1.0.0.xsd">
+
+  <servers>
+    <server>
+      <id>github-hugmesh-build-config</id>
+      <username>${env.UPSTREAM_PACKAGES_ACTOR}</username>
+      <password>${env.UPSTREAM_PACKAGES_TOKEN}</password>
+    </server>
+    <server>
+      <id>github-hugmesh-parent</id>
+      <username>${env.UPSTREAM_PACKAGES_ACTOR}</username>
+      <password>${env.UPSTREAM_PACKAGES_TOKEN}</password>
+    </server>
+    <server>
+      <id>github-hugmesh-commons</id>
+      <username>${env.UPSTREAM_PACKAGES_ACTOR}</username>
+      <password>${env.UPSTREAM_PACKAGES_TOKEN}</password>
+    </server>
+    <server>
+      <id>github-hugmesh-auth-core</id>
+      <username>${env.UPSTREAM_PACKAGES_ACTOR}</username>
+      <password>${env.UPSTREAM_PACKAGES_TOKEN}</password>
+    </server>
+  </servers>
+
+  <profiles>
+    <profile>
+      <id>github-hugmesh-packages</id>
+
+      <repositories>
+        <repository>
+          <id>github-hugmesh-build-config</id>
+          <url>https://maven.pkg.github.com/hugmesh/hugmesh-build-config</url>
+          <releases><enabled>true</enabled></releases>
+          <snapshots><enabled>false</enabled></snapshots>
+        </repository>
+        <repository>
+          <id>github-hugmesh-parent</id>
+          <url>https://maven.pkg.github.com/hugmesh/hugmesh-parent</url>
+          <releases><enabled>true</enabled></releases>
+          <snapshots><enabled>false</enabled></snapshots>
+        </repository>
+        <repository>
+          <id>github-hugmesh-commons</id>
+          <url>https://maven.pkg.github.com/hugmesh/hugmesh-commons</url>
+          <releases><enabled>true</enabled></releases>
+          <snapshots><enabled>false</enabled></snapshots>
+        </repository>
+        <repository>
+          <id>github-hugmesh-auth-core</id>
+          <url>https://maven.pkg.github.com/hugmesh/hugmesh-auth-core</url>
+          <releases><enabled>true</enabled></releases>
+          <snapshots><enabled>false</enabled></snapshots>
+        </repository>
+      </repositories>
+
+      <pluginRepositories>
+        <pluginRepository>
+          <id>github-hugmesh-build-config</id>
+          <url>https://maven.pkg.github.com/hugmesh/hugmesh-build-config</url>
+          <releases><enabled>true</enabled></releases>
+          <snapshots><enabled>false</enabled></snapshots>
+        </pluginRepository>
+        <pluginRepository>
+          <id>github-hugmesh-parent</id>
+          <url>https://maven.pkg.github.com/hugmesh/hugmesh-parent</url>
+          <releases><enabled>true</enabled></releases>
+          <snapshots><enabled>false</enabled></snapshots>
+        </pluginRepository>
+        <pluginRepository>
+          <id>github-hugmesh-commons</id>
+          <url>https://maven.pkg.github.com/hugmesh/hugmesh-commons</url>
+          <releases><enabled>true</enabled></releases>
+          <snapshots><enabled>false</enabled></snapshots>
+        </pluginRepository>
+        <pluginRepository>
+          <id>github-hugmesh-auth-core</id>
+          <url>https://maven.pkg.github.com/hugmesh/hugmesh-auth-core</url>
+          <releases><enabled>true</enabled></releases>
+          <snapshots><enabled>false</enabled></snapshots>
+        </pluginRepository>
+      </pluginRepositories>
+    </profile>
+  </profiles>
+
+  <!-- Active unconditionally: this file only ever reaches a build that asked for it by path. -->
+  <activeProfiles>
+    <activeProfile>github-hugmesh-packages</activeProfile>
+  </activeProfiles>
+</settings>

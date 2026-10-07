@@ -20,20 +20,40 @@ WORKDIR /work
 # holds hugmesh-parent/hugmesh-commons).
 ARG CI_API_V4_URL
 ARG GITLAB_GROUP_ID
+# GitHub Packages login name for the packages_read_token secret below. Only a name, not
+# a credential, so an ARG is fine; defaults to "hugmesh" in the RUN when unset.
+ARG UPSTREAM_PACKAGES_ACTOR
 ENV CI_API_V4_URL=${CI_API_V4_URL} \
     GITLAB_GROUP_ID=${GITLAB_GROUP_ID}
 
 COPY . .
 
+# TWO REGISTRY CONTRACTS, SELECTED BY WHICH SECRET IS MOUNTED
+#   * No packages_read_token secret (GitLab CI, the compose / kind local lane): exactly the
+#     historical build, `-s settings.xml` against the GitLab group registry. Unchanged.
+#   * packages_read_token present (GitHub release workflow): `-s .github/maven-ci-settings.xml`
+#     against GitHub Packages (maven.pkg.github.com/hugmesh/*), authenticated with that
+#     read:packages token. The token is a BuildKit secret too: never an ARG/ENV, never a layer.
+# `sh -euc`, NOT `-euxc`: xtrace would print `export UPSTREAM_PACKAGES_TOKEN=<value>` into the
+# BuildKit log, and the build-record artifact build-push-action uploads holds raw BuildKit logs,
+# which runner-side secret masking does not cover.
+#
 # Resolve + build. CI_JOB_TOKEN is read from a BuildKit secret file and exported only
 # for the lifetime of this RUN (so it is never persisted). `-s settings.xml` points
 # Maven at the gitlab-maven registry for the private hugmesh-commons artifact.
 RUN --mount=type=secret,id=ci_job_token \
-    sh -euxc '\
+    --mount=type=secret,id=packages_read_token \
+    sh -euc '\
       if [ -f /run/secrets/ci_job_token ]; then \
         export CI_JOB_TOKEN="$(cat /run/secrets/ci_job_token)"; \
       fi; \
-      ./mvnw -B -s settings.xml package -DskipTests'
+      if [ -f /run/secrets/packages_read_token ]; then \
+        export UPSTREAM_PACKAGES_TOKEN="$(cat /run/secrets/packages_read_token)"; \
+        export UPSTREAM_PACKAGES_ACTOR="${UPSTREAM_PACKAGES_ACTOR:-hugmesh}"; \
+        ./mvnw -B -s .github/maven-ci-settings.xml package -DskipTests; \
+      else \
+        ./mvnw -B -s settings.xml package -DskipTests; \
+      fi'
 
 FROM eclipse-temurin:25-jre
 # curl is required by this image's docker-compose HEALTHCHECK (actuator/health/readiness);
