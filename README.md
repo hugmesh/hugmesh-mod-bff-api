@@ -107,7 +107,8 @@ directly, or that it's the sibling of:
   moderation audit trail.
 - [`hugmesh-fe-gateway`](https://github.com/hugmesh/hugmesh-fe-gateway) — the
   platform's edge gateway; fronts this BFF, applies route-access rules, and bridges the
-  native-login session.
+  native-login session. It is an overlay on the shared `hugmesh-gateway` image, which
+  holds the filters.
 - [`hugmesh-commons`](https://github.com/hugmesh/hugmesh-commons) — the shared
   security/tenancy library (Casdoor JWT converter, domain registry) this service
   consumes rather than reimplementing.
@@ -647,7 +648,7 @@ tenant scope identically to the gateway (same shared commons code):
   verbatim, legacy `isAdmin` → `ROLE_ADMIN`, a `ROLE_USER` floor, and stamps exactly
   **one** issuer-derived `DOMAIN_<x>` authority resolved through a `DomainRegistry`.
   Crucially it **strips any `permissions` entry beginning with the reserved
-  `ROLE_`/`DOMAIN_` prefixes** — those authorities come only from controlled logic,
+  `ROLE_`/`DOMAIN_`/`MFA_SATISFIED` prefixes** — those authorities come only from controlled logic,
   so a brand-X token carrying `permissions:["DOMAIN_other"]` or
   `permissions:["ROLE_SUPERADMIN"]` cannot forge a tenant scope or super-role.
 - **`DomainRegistry` (issuer → domain).** Seeded from
@@ -674,8 +675,9 @@ tenant scope identically to the gateway (same shared commons code):
   collide cross-tenant (changelogs `005-mod-action-domain.xml`,
   `006-mod-action-dedup-domain.xml`).
 - **SUPERADMIN is unscoped.** The cross-domain infra control plane reads with NO
-  domain predicate (every brand). The `/bff/mod/**` floor and the prod spec gate
-  are `hasAnyRole('MOD','ADMIN','SUPERADMIN')` (`SecurityConfig`).
+  domain predicate (every brand). The `/bff/mod/**` floor is
+  `hasAnyRole('MOD','ADMIN','SUPERADMIN')` and the prod spec gate is
+  `hasAnyRole('ADMIN','SUPERADMIN')` (`SecurityConfig`).
 - **Same-tenant write confinement (A01 BOLA/BFLA).** A MOD's write-effects
   (ban / lift / domain-lock / unlock) are confined to the caller's own
   issuer-derived tenant. `ModService.guardSameTenant` runs **fail-closed (`403`)
