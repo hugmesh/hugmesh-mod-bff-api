@@ -4,7 +4,8 @@
 
 This BFF is defended in depth by two independent layers:
 
-1. **Application-layer authentication.** Every request must carry either a valid
+1. **Application-layer authentication.** Every request, except the `/actuator/health` and
+   `/actuator/info` probes, must carry either a valid
    Casdoor-issued JWT (`spring.security.oauth2.resourceserver`; the forwarded
    bearer is re-validated and propagated to federation-api/admin-bff/owncast-bff so
    the original moderator is authorised end-to-end) or, for a native-login caller,
@@ -25,7 +26,8 @@ This BFF is defended in depth by two independent layers:
 ## How the mTLS layer is wired
 
 The cluster CA is the offline root from `hugmesh-generator/scripts/gen-keystores.sh`.
-In-cluster, Vault PKI imports that CA and issues a short-lived leaf cert per app;
+In-cluster, Vault PKI imports that CA and issues a short-lived leaf cert per app
+(`pki_int/issue/hugmesh-mod-bff-api`, TTL 720h);
 External Secrets Operator (ESO) syncs it into the `hugmesh-mod-bff-api-mtls`
 `kubernetes.io/tls` Secret (`tls.crt` / `tls.key` / `ca.crt`). A keystore
 initContainer (the equivalent of the gateway chart's `build-keystore`) assembles:
@@ -36,11 +38,13 @@ initContainer (the equivalent of the gateway chart's `build-keystore`) assembles
 into an in-pod tmpfs and generates the store password there (it never enters git,
 a Secret, or Vault). The deployment then sets the env below so the running pod
 enforces client-cert verification. Because every in-cluster leaf chains to the same
-cluster CA, the truststore validates them; ESO rotates the cert before expiry.
+cluster CA, the truststore validates them. ESO re-issues the cert every 168h
+(`refreshInterval`); the initContainer builds the stores once, at pod start.
 
 The gateway (`hugmesh-fe-gateway`) is the legitimate caller: it presents its own
-ESO-issued client cert when proxying to this BFF, so its handshake succeeds while
-everyone else's fails.
+ESO-issued client cert when proxying to this BFF (`specs/cluster/apps/20-gateway-fe.yaml`
+sets `HUGMESH_GATEWAY_MTLS_ENABLED=true`), so its handshake succeeds while everyone
+else's fails.
 
 ## Configuration (parameterized — safe by default)
 
@@ -52,10 +56,10 @@ everyone else's fails.
 | `server.ssl.client-auth` | `SSL_CLIENT_AUTH` | `none` | `need` |
 | `server.ssl.key-store` | `SSL_KEY_STORE` | `/stores/keystore.p12` | mounted PKCS12 keystore |
 | `server.ssl.key-store-type` | `SSL_KEY_STORE_TYPE` | `PKCS12` | `PKCS12` |
-| `server.ssl.key-store-password` | `SSL_KEY_STORE_PASSWORD` | _(empty)_ | in-pod-generated |
+| `server.ssl.key-store-password` | `SSL_KEY_STORE_PASSWORD` | _(empty)_ | in-pod-generated, set through `/stores/application.properties` |
 | `server.ssl.trust-store` | `SSL_TRUST_STORE` | `/stores/truststore.p12` | mounted PKCS12 truststore (cluster CA) |
 | `server.ssl.trust-store-type` | `SSL_TRUST_STORE_TYPE` | `PKCS12` | `PKCS12` |
-| `server.ssl.trust-store-password` | `SSL_TRUST_STORE_PASSWORD` | _(empty)_ | in-pod-generated |
+| `server.ssl.trust-store-password` | `SSL_TRUST_STORE_PASSWORD` | _(empty)_ | in-pod-generated, set through `/stores/application.properties` |
 | `server.ssl.enabled-protocols` | `SSL_ENABLED_PROTOCOLS` | `TLSv1.3` | `TLSv1.3` |
 
 With the defaults, `server.ssl.enabled=false`, so the stores are never opened and
@@ -63,28 +67,27 @@ existing tests run unchanged. `client-auth` maps to Netty's `ClientAuth`:
 `none → NONE`, `want → OPTIONAL`, `need → REQUIRE`. WebFlux/Netty reads these
 properties directly; no custom `SslContext`/`HttpServer` bean is needed.
 
-## Deployment requirement (owned by hugmesh-generator)
+## Deployment (owned by hugmesh-generator)
 
 The deployment manifest for this BFF lives in `hugmesh-generator`
-(`specs/cluster/manifests/mod-bff-api/deployment.yaml`), not in this repo. To
-turn enforcement on, that deployment must (a) add the keystore initContainer +
-`pki` (from `hugmesh-mod-bff-api-mtls`) and `stores` (tmpfs) volumes —
-exactly as `charts/hugmesh-gateway/templates/deployment.yaml` does — and (b) set:
+(`specs/cluster/manifests/mod-bff-api/deployment.yaml`), not in this repo. On
+`origin/main` (checked 2026-10-07) it enforces the server side:
 
-```
-SSL_ENABLED=true
-SSL_CLIENT_AUTH=need
-SSL_KEY_STORE=/stores/keystore.p12
-SSL_KEY_STORE_TYPE=PKCS12
-SSL_KEY_STORE_PASSWORD=<in-pod generated>
-SSL_TRUST_STORE=/stores/truststore.p12
-SSL_TRUST_STORE_TYPE=PKCS12
-SSL_TRUST_STORE_PASSWORD=<in-pod generated>
-```
-
-The readiness/liveness probes must switch to HTTPS (`scheme: HTTPS`) once
-`SSL_ENABLED=true`, and the gateway must present its client cert AND call this BFF
-over `https://` for the route to keep working.
+- a `build-keystore` initContainer, a `pki` volume (the `hugmesh-mod-bff-api-mtls`
+  Secret) and a `stores` tmpfs volume, as in
+  `specs/cluster/charts/hugmesh-gateway/templates/deployment.yaml`;
+- the env `SSL_ENABLED=true`, `SSL_CLIENT_AUTH=need`, `SSL_KEY_STORE=/stores/keystore.p12`,
+  `SSL_KEY_STORE_TYPE=PKCS12`, `SSL_TRUST_STORE=/stores/truststore.p12`,
+  `SSL_TRUST_STORE_TYPE=PKCS12` and `SPRING_CONFIG_ADDITIONAL_LOCATION=file:/stores/`;
+- store passwords that are not env vars. The initContainer writes
+  `/stores/application.properties` with `server.ssl.key-store-password`,
+  `server.ssl.trust-store-password` and the two `hugmesh.mtls.client.*` passwords. The file
+  must be named `application.properties`: Spring loads a profile-named file from that
+  directory only when that profile is active;
+- exec probes that run `curl --cert /pki/tls.crt --key /pki/tls.key --cacert /pki/ca.crt`
+  against `https://hugmesh-mod-bff-api:8080/actuator/health/{readiness,liveness}`. With
+  `client-auth=need` a kubelet `httpGet` cannot present a client cert, so the handshake
+  would fail.
 
 Note: this BFF is also an mTLS **client** of federation-api / admin-bff, and that
 outbound client-cert presentation is **already implemented** and config-gated.
@@ -93,5 +96,7 @@ outbound client-cert presentation is **already implemented** and config-gated.
 `hugmesh.mtls.client.enabled` (env `HUGMESH_MTLS_CLIENT_ENABLED`, **default
 off** so local/dev/CI plaintext is unaffected) — see the README *API-to-API mTLS /
 Client side (outbound)* section. The remaining follow-up is purely deployment-side:
-the generator must enable + rotate the client identity (it is independent of the
-server-side enforcement described above).
+the generator manifest leaves `HUGMESH_MTLS_CLIENT_ENABLED` unset (off) and points
+`FEDERATION_API_BASE_URL` and `ADMIN_BFF_BASE_URL` at `https://` hosts, so the generator must
+still enable the client identity (it is independent of the server-side enforcement
+described above).
