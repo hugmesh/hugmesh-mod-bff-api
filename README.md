@@ -1,7 +1,7 @@
 # hugmesh-mod-bff-api
 
 Moderator Backend-For-Frontend (BFF) for the HugMesh platform. It is the
-**MODERATOR-scoped** (Casdoor `ROLE_MOD` or `ROLE_ADMIN`) sibling of the future
+**MODERATOR-scoped** (Casdoor `ROLE_MOD` or `ROLE_ADMIN`) sibling of
 `hugmesh-mod-ui`, and the role analog of `hugmesh-admin-bff-api` — but with a
 deliberately **narrow** surface. A moderator triages reports, records recommendations,
 escalates to admins, issues server-wide blocks, writes access-role bans, and
@@ -32,8 +32,8 @@ security/tenancy code); conventions copied verbatim from `hugmesh-admin-bff-api`
   domain microservice: it owns exactly one runtime table (its audit log) and is a
   reactive `WebClient` **client** of `hugmesh-federation-api` (the moderation
   queue + federation manifest), `hugmesh-admin-bff-api` (the desired-state
-  writer + reconcile loop), the homeservers (tuwunel/akkoma), and Casdoor (a target
-  role lookup) — never their datastore.
+  writer + reconcile loop), the homeservers (tuwunel/akkoma), and Casdoor (target
+  role and org lookups) — never their datastore.
 - **Namespace:** in-cluster `hugmesh-backend` (its downstreams resolve at
   `*.hugmesh-backend.svc.cluster.local`; the Casdoor role lookup reaches the
   `hugmesh-pki` namespace via the PKI gateway). `spring.application.name` =
@@ -57,7 +57,7 @@ security/tenancy code); conventions copied verbatim from `hugmesh-admin-bff-api`
   BFF **unswapped**, so this BFF resolves the session itself. See *Native-login
   (`bff_` session) support* below.
 
-Topology (solid = ✅ shipped call path; dashed = 🔭 planned component; the akkoma
+Topology (the akkoma
 block leg is ✅ wired-but-dark — real HTTP when enabled. There is no tuwunel edge: a
 Matrix user block is a reversible domain-lock written through admin-bff, a Matrix
 instance block is a request filed with federation-api, and the one-way Matrix
@@ -66,7 +66,7 @@ deactivate lives in admin-bff since decision 83b):
 ```mermaid
 flowchart LR
     mod(["Moderator (Casdoor JWT)"])
-    ui["hugmesh-mod-ui<br/>(planned)"]
+    ui["hugmesh-mod-ui"]
     gw["fe-gateway<br/>(bff_→JWT swap + route-access + bearer fwd)"]
     bff["hugmesh-mod-bff-api<br/>/bff/mod/**"]
     audit[("mod_action<br/>(R2DBC, owned)")]
@@ -77,7 +77,7 @@ flowchart LR
     akkoma["akkoma<br/>(Mastodon admin)"]
 
     mod --> gw
-    ui -.-> gw
+    ui --> gw
     gw -->|"validated bearer"| bff
     bff -->|"owns"| audit
     bff -->|"bearer fwd + mTLS"| fed
@@ -85,9 +85,6 @@ flowchart LR
     bff -->|"bearer fwd + mTLS<br/>hide/kill/restore"| owncast
     bff -->|"target role / org lookup"| casdoor
     bff -->|"block (✅ wired, dark by default)"| akkoma
-
-    classDef planned stroke-dasharray:4,stroke:#888;
-    class ui planned;
 ```
 
 ### Part of the HugMesh platform
@@ -117,13 +114,13 @@ directly, or that it's the sibling of:
 - [`hugmesh-generator`](https://github.com/hugmesh/hugmesh-generator) — cluster
   manifests, deployment tooling, and the shared pen-test CI stage this repo's pipeline
   extends.
-- `hugmesh-mod-ui` — the moderator-facing Angular front end for this BFF. Planned; not
-  yet published.
+- `hugmesh-mod-ui` — the moderator console for this BFF: an Angular native-federation
+  remote that `hugmesh-host-shell` mounts at `/mod`.
 
 ## What it does
 
 The whole surface lives under `/bff/mod/**` and is gated `hasAnyRole('MOD','ADMIN')`
-three ways (defence in depth): the fe-gateway route-access rules, the
+(`SUPERADMIN` passes through the role hierarchy) three ways (defence in depth): the fe-gateway route-access rules, the
 resource-server filter chain path rule, and `@PreAuthorize` on every method.
 
 | Endpoint | Method | Purpose | Talks to |
@@ -153,9 +150,9 @@ users deactivate` transport — see *Reversibility* below); **Matrix + instance*
 records a durable REQUEST (`requested:no-tuwunel-verb`), never attempting
 anything, because tuwunel has no runtime per-server block verb; **akkoma
 (Mastodon), both scopes** still drives the homeserver admin call directly (✅
-wired-but-dark — real HTTP once enabled, `ok` on success). `ban` does NOT touch Casdoor or the
+wired-but-dark — real HTTP once enabled, `ok` on success). `ban` does NOT touch Casdoor or a homeserver. It writes the
 `access_suspension` **desired-state** in `hugmesh-admin-bff-api` (which owns the
-route-access DB + the single-writer reconcile loop) and the loop converges Casdoor
+route-access DB + the single-writer reconcile loop), and the loop converges Casdoor
 membership + the homeserver suspend state. Both return **`202 {state:'pending-reconcile'}`**
 for any non-applied outcome (STUBBED / `degraded` / breaker-open) — **never** a
 synchronous `200 "blocked"`, because the effect is asynchronous. A ban is guarded
@@ -165,8 +162,8 @@ tenant** — the same-tenant guard (`guardSameTenant`) runs fail-closed (`403`)
 before any privileged read or write, resolving the target's brand off the caller's
 per-domain Casdoor org (`SUPERADMIN` and the single-tenant `default` domain bypass;
 see *Multi-tenancy / domain-scoping*). The matrix/mastodon `block` path additionally requires the platform role
-(`ROLE_MATRIX` / `ROLE_MASTODON`, or `ROLE_ADMIN`) — enforced at the method AND the
-service layer. Bans are **idempotent**: a deterministic `dedup_key` (a unique
+(`ROLE_MATRIX` / `ROLE_MASTODON`, or `ROLE_ADMIN`) — enforced in `ModService`
+(`assertPlatformRole`); the `@PreAuthorize` on `block` checks only the role and step-up. Bans are **idempotent**: a deterministic `dedup_key` (a unique
 index + `INSERT ... ON CONFLICT DO NOTHING`) absorbs at-least-once redelivery so a
 retry neither double-records nor re-issues the desired-state write.
 
@@ -184,7 +181,7 @@ service at all: decision 83b (2026-09-23) moved the ADMIN-only deactivate to
 hugmesh-admin-bff-api (`POST /bff/admin/matrix/deactivations/propose`, then
 `.../confirm`, hugmesh-admin-bff-api#115), and this repo's former copy
 (`MatrixAdminClient.blockUser` + `DEACTIVATE_COMMAND`) was deleted
-(hugmesh-mod-bff-api#23; `MatrixAdminClientNoUserDeactivateTest` fails if it comes
+(hugmesh-mod-bff-api#28, closing issue #23; `MatrixAdminClientNoUserDeactivateTest` fails if it comes
 back). `MatrixBlockIsOneWayTest` pins the OPPOSITE of its old property for the MOD
 path: block-then-domain-unlock is a genuine round trip.
 
@@ -199,7 +196,7 @@ written via `POST/DELETE /bff/admin/domain-lock/{platform}/{user}` through a ded
 `AdminDomainLockClient` (same mTLS + bearer-forwarding + `@CircuitBreaker` as the
 suspension client). Same delegation guards as a ban — a MOD may **not** domain-lock
 themselves, nor a `ROLE_ADMIN`/`ROLE_MOD` target, nor a target outside the caller's
-own tenant (all `403`, enforced at the method AND the service layer via the same
+own tenant (all `403`, enforced in `ModService` by the same
 self-ban / privileged-target / same-tenant guards) — same idempotent `dedup_key`, and the same
 `202 {state:'pending-reconcile'}` contract (the single-writer reconcile loop applies
 the marker + the homeserver/egress force-local enforcement asynchronously). The
@@ -234,7 +231,7 @@ sequenceDiagram
     BFF->>FedAPI: Bearer <token> (BearerForwardingFilter)
     BFF->>AdminBFF: Bearer <token> + mTLS (ban/lock/unlock)
     BFF->>OwncastBFF: Bearer <token> + mTLS (hide/kill/restore)
-    BFF->>Casdoor: HTTP Basic client-creds (target role lookup only)
+    BFF->>Casdoor: HTTP Basic client-creds (target role / org lookup only)
     Note over BFF,Casdoor: Casdoor lookup gated on CASDOOR_ADMIN_ENABLED (default false)
 ```
 
@@ -262,7 +259,7 @@ sequenceDiagram
   all**: its only verb is the instance block, which records a REQUEST
   (`requested:no-tuwunel-verb`, decision 50). Its former user deactivate (the
   admin-room `!admin users deactivate` transport) moved to hugmesh-admin-bff-api
-  under decision 83b (hugmesh-mod-bff-api#23), so `MATRIX_BASE_URL` /
+  under decision 83b (hugmesh-mod-bff-api#28, closing issue #23), so `MATRIX_BASE_URL` /
   `MATRIX_SERVER_NAME` / `MATRIX_ADMIN_ROOM` are still defined in `application.yml`
   but nothing in this service reads them any more — see *Reversibility* and
   *Honest deferrals*.
@@ -290,9 +287,9 @@ sequenceDiagram
   (`@CircuitBreaker(name="owncast-bff")`) is `202 {state:'not-applied'}` with an
   explicit no-reconcile-loop retry note — never a fake success — and a 404
   (no stream in the brand) surfaces as a real 404 with NO ledger row.
-- **Casdoor** (read-only, via the hugmesh-pki gateway) — for the non-privileged
-  target guard only: resolve whether a ban/domain-lock target holds `ROLE_ADMIN`/`ROLE_MOD`
-  (the `CasdoorRoleClient`, HTTP Basic client-credentials against
+- **Casdoor** (read-only, via the hugmesh-pki gateway) — for the target guards only:
+  resolve whether a ban/domain-lock target holds `ROLE_ADMIN`/`ROLE_MOD`, and whether the
+  target belongs to the caller's brand org (the `CasdoorRoleClient`, HTTP Basic client-credentials against
   `PKI_GATEWAY_BASE`). GATED behind `CASDOOR_ADMIN_ENABLED` (default false); a
   Casdoor-less dev/CI run boots clean (the guard then resolves to "not privileged";
   the always-on self-ban + method/gateway gates still apply).
@@ -333,46 +330,50 @@ sequenceDiagram
 ### `@system` notification directive (✅ shipped, ships dark)
 
 > **"Ships dark"** means the code is merged and the database columns exist, but no
-> downstream component consumes the data yet. The feature activates without a code
-> change once admin-bff's outbox subsystem lands.
+> downstream component reads the directive yet. admin-bff's `SuspensionRequest` has no
+> notify fields, and `git grep` for `notifyChannels` or `notifyEmailOnly` on admin-bff
+> `origin/main` finds nothing, so admin-bff ignores what this BFF sends. Delivery needs a
+> code change in admin-bff.
 
-A moderator can attach a **service-scoped notification directive** to a ban, lift, or
-domain-lock action so the platform notifies the affected user via the per-domain
+A moderator can attach a **service-scoped notification directive** to a ban so the
+platform would notify the affected user via the per-domain
 neutral `@system` sender (never exposing the individual moderator's identity). The
-`POST/DELETE /bff/mod/ban` and lock request bodies accept `notifyChannels` (a list of
-channels) and `emailOnly`. `NotifyDirective.resolve(...)` scopes the request against
+`POST /bff/mod/ban` body accepts `notifyChannels` (a list of at most 8 channels) and
+`notifyEmailOnly`. The lift (`DELETE /bff/mod/ban`) and domain-lock calls carry no
+directive. `NotifyDirective.resolve(...)` scopes the request against
 the action's platform before the directive is stored:
 
 - `in-app` and `email` are always allowed.
 - A platform-bound channel (`matrix` / `mastodon`) is honoured **only** when the
   action's own platform matches it — an off-scope channel is silently dropped. A
   `matrix` ban, for example, can never trigger a `mastodon` DM.
-- `emailOnly=true` overrides the channel list and forces the directive to exactly
+- `notifyEmailOnly=true` overrides the channel list and forces the directive to exactly
   `email` + `in-app` (the conservative low-noise option).
 
 Example ban request body with a notification directive:
 
 ```json
 {
-  "role": "ROLE_MATRIX",
-  "targetUser": "user@example.com",
+  "platform": "matrix",
+  "target": "user@example.com",
   "reason": "repeated harassment",
   "notifyChannels": ["in-app", "matrix"],
-  "emailOnly": false
+  "notifyEmailOnly": false
 }
 ```
 
 The resolved directive is recorded on the `mod_action` row (`notify_channels` CSV +
-`notify_email_only`, changelog `008`) and forwarded to admin-bff's notification
-subsystem.
+`notify_email_only`, changelog `008`) and sent to admin-bff in the suspension write
+(`notifyChannels` / `notifyEmailOnly`). admin-bff does not read them yet.
 
 **Identity rule (load-bearing):** the directive describes the requested fan-out only
 — it carries **no** actor identity. Neither this BFF nor the `@system` outbox-builder
 ever copies `mod_action.actor` into the notification, so a notified user can never
 determine who moderated them. This matches the posture of the public appeal-contact
-resolver. Nothing currently consumes the stored columns beyond the audit row and the
-forwarded directive — admin-bff's outbox subsystem is the consumer. External delivery
-adapters (Matrix DM / Akkoma feed / phpBB / email) land in admin-bff; see *Roadmap*.
+resolver. Nothing currently consumes the stored columns beyond the audit row. admin-bff has a
+notification outbox and an external-channel reconciler
+(`notification/ExternalChannelReconciler`), but no code that reads the directive from
+the suspension request; see *Roadmap*.
 
 ### The user → mod → admin escalation chain
 
@@ -422,12 +423,13 @@ The JWT→authority converter is the shared `CasdoorAuthorities` from
 - every authenticated principal gets a `ROLE_USER` floor;
 - each `roles` claim entry (string or `{name}`) becomes `ROLE_<UPPER>` (so Casdoor
   `mod` → `ROLE_MOD`, `admin` → `ROLE_ADMIN`);
-- each `permissions` entry becomes a verbatim authority;
+- each `permissions` entry becomes a verbatim authority, except entries that start with
+  the reserved prefixes `ROLE_`, `DOMAIN_` or `MFA_SATISFIED`, which are dropped;
 - `isAdmin == true` adds `ROLE_ADMIN`.
 
 Profile split (matches admin-bff): the OpenAPI spec + Swagger UI are **public**
 under `dev`/`test` (so `gen:fetch` / the docs pipeline can curl `/v3/api-docs`
-without a token) and **`ROLE_ADMIN`-gated** in prod. There is no `/login` /
+without a token) and gated to **`ROLE_ADMIN`** or `ROLE_SUPERADMIN` in prod. There is no `/login` /
 `/register` plumbing here — login/session is owned by `user-bff` (the server-side
 Casdoor code↔token exchange + per-session JWT custody) and account/registration
 DATA lives in `admin-bff-db`; this BFF is **post-login** and never holds any
@@ -524,7 +526,8 @@ all five operations in the committed `openapi/openapi.json`. **No flag is flippe
 with `enforce-sensitive-writes` dark (the shipped default) nothing is denied and nothing
 is signalled.
 
-Two independent flags, both `false` by default (`ModStepUpGate` / `SecurityConfig`):
+Three properties (`ModStepUpGate` / `SecurityConfig`). The two flags are `false` by
+default; the window is 10 minutes:
 
 | Property | Env | Governs |
 | --- | --- | --- |
@@ -572,7 +575,7 @@ bearer-token converter from also trying (and failing) to JWT-decode the same
 opaque token when it arrives as an `Authorization` header. A real Casdoor JWT
 request is completely unaffected by any of this.
 
-**Downstream custody exchange (ships dark).** A native-login caller's resolved
+**Downstream custody exchange (off by default).** A native-login caller's resolved
 `Authentication` carries no raw JWT to forward, so `BearerForwardingFilter` (the
 same filter that forwards a real JWT verbatim to federation-api / admin-bff /
 owncast-bff, see *Who calls what* above) attempts a best-effort custody exchange:
@@ -584,7 +587,9 @@ mirroring the gateway's own exchange cache — **default `cache-ttl-ms=0` since
 2026-09-18, operator decision 60 on hugmesh-mod-bff-api#15: the cache is OFF, every
 exchange call re-consults admin-bff's suspension gate, mirroring hugmesh-gateway PR
 #30's decision-7 posture; the previous default was `5000`**). Gated behind
-`app.bff-exchange.enabled` (default `false`); on ANY failure — the feature not
+`app.bff-exchange.enabled` (default `false`; the cluster manifest in `hugmesh-generator`,
+`specs/cluster/manifests/mod-bff-api/deployment.yaml`, sets `APP_BFF_EXCHANGE_ENABLED=true`
+and `APP_BFF_EXCHANGE_CACHE_TTL_MS=0`); on ANY failure — the feature not
 opted in, custody not configured on admin-bff-api, an unknown/expired session, or
 a transient outage — the filter falls through to exactly the pre-fix behaviour:
 no `Authorization` header, request forwarded unmodified. This is a deliberate,
@@ -687,15 +692,16 @@ behaviour end-to-end through the real filter chain.
 
 ## Paired UI
 
-`hugmesh-mod-ui` (built later) is the Angular host that consumes this BFF's
-OpenAPI spec (ng-openapi-gen typed client) and renders the moderation queue, the
-refer-to-admin action, the server-wide block form, and the federation modules it
-delivers — the moderator analog of admin-ui ↔ admin-bff.
+`hugmesh-mod-ui` is the Angular native-federation remote that consumes this BFF's
+OpenAPI spec (ng-openapi-gen typed client) and renders the moderation console, the
+system-findings queue, the ban / domain-lock / server-wide-block controls and the
+audit trail — the moderator analog of admin-ui ↔ admin-bff.
 
 ## API-to-API mTLS
 
 Both directions are config-gated and **default OFF** (so local/dev/CI plaintext is
-unaffected); the in-cluster deployment flips them on with the mounted PKCS12 stores
+unaffected). The cluster manifest turns the server side on and leaves the client side
+off (`HUGMESH_MTLS_CLIENT_ENABLED` unset). Both use the mounted PKCS12 stores
 (`/stores/keystore.p12` = this service's Vault-PKI identity, `/stores/truststore.p12`
 = the cluster CA):
 
@@ -707,8 +713,8 @@ unaffected); the in-cluster deployment flips them on with the mounted PKCS12 sto
   PKI client identity (and trusts the cluster CA) on its outbound federation-api /
   admin-bff calls. One mounted `/stores` layout serves both directions.
 
-Store passwords are generated in-pod and injected via environment variables — they
-are never stored in git. See [`SECURITY.md`](SECURITY.md) for the full
+Store passwords are generated in-pod and written to `/stores/application.properties`,
+which `SPRING_CONFIG_ADDITIONAL_LOCATION` loads — they are never stored in git. See [`SECURITY.md`](SECURITY.md) for the full
 transport-layer trust-boundary detail (Vault PKI / ESO wiring, the keystore
 initContainer) and the generator-owned deployment requirement.
 
@@ -731,12 +737,13 @@ initContainer) and the generator-owned deployment requirement.
     ADMIN-only deactivate to **hugmesh-admin-bff-api**, behind a propose/confirm
     token pair and its own `MATRIX_ADMIN_DEACTIVATE_*` flags
     (hugmesh-admin-bff-api#115), and this repo's dormant copy was deleted
-    (hugmesh-mod-bff-api#23). `MatrixAdminClientNoUserDeactivateTest` fails if a
+    (hugmesh-mod-bff-api#28, closing issue #23). `MatrixAdminClientNoUserDeactivateTest` fails if a
     user-deactivate method or the `users deactivate` verb text comes back to this
     service's code. What is left of `MatrixAdminClient`: off (the default) it
     returns `STUBBED`; on without a token it degrades `no-admin-token`; on with a
     token the instance block records a REQUEST. `MATRIX_ADMIN_ENABLED` does not
-    occur in any hugmesh-generator manifest (measured 2026-09-17).
+    occur in any hugmesh-generator manifest (re-measured 2026-10-07 with `git grep` over
+    `specs/`; `MASTODON_ADMIN_ENABLED` does not occur either).
     **block-instance (operator decision 50)** has no runtime per-server
     federation-block verb either — the leg records a **REQUEST**
     (`requested:no-tuwunel-verb`, never `degraded`: nothing failed, nothing could
@@ -829,8 +836,8 @@ initContainer) and the generator-owned deployment requirement.
   fail-closed isolation on audit reads + write confinement, composite
   `(dedup_key, domain)` uniqueness).
 - **✅ Mod surface shipped:** moderation queue/recommend/refer, server-wide block
-  (Matrix/tuwunel admin-room command ✅ wired, dark by default, `posted` never `ok`;
-  akkoma/Mastodon call ✅ wired, dark by default),
+  (Matrix user block = reversible domain-lock; Matrix instance block = a recorded request
+  filed into federation-api; akkoma/Mastodon call ✅ wired, dark by default),
   access-role ban/lift, domain-lock/unlock, owncast hide/kill/restore (the
   `/bff/mod/owncast/**` central wiring → owncast-bff effector + `owncast.*` ledger
   rows), modules
@@ -857,13 +864,12 @@ yet in this repo's code** and is recorded here so the doc never presents unmerge
 work as done:
 
 - 🚧 **Notification external-channel adapters.** The mod-bff already records +
-  forwards the `@system` directive (✅, above), but the actual **delivery adapters**
-  (Matrix DM / Akkoma local feed / phpBB forum / email) live in admin-bff's outbox
-  subsystem and are landing there; minimal user-preference / silencing tables are
-  part of that work. No further mod-bff code change is required for the directive
-  itself.
+  sends the `@system` directive (✅, above), but admin-bff does not read it yet. The
+  **delivery adapters** (Matrix DM / Akkoma local feed / phpBB forum / email) belong to
+  admin-bff's outbox subsystem. The work in this repo is done; the work that reads the
+  directive is in admin-bff.
 - ✅ **Matrix(tuwunel) ADMIN-only deactivate path — moved to hugmesh-admin-bff-api
-  (decision 83b, 2026-09-23), hugmesh-mod-bff-api#23.** The ADMIN-only deactivate
+  (decision 83b, 2026-09-23), hugmesh-mod-bff-api#28 (issue #23).** The ADMIN-only deactivate
   is built in admin-bff (`POST /bff/admin/matrix/deactivations/propose` then
   `.../confirm`, `hasRole('ADMIN')`, dark by default, hugmesh-admin-bff-api#115),
   and this repo's dormant copy of the transport is deleted — it is no longer a
@@ -909,8 +915,6 @@ work as done:
   session bridge — see *Native-login (`bff_` session) support*) and needs no
   further code change beyond verification coverage; the cross-realm security e2e
   suite itself is a platform-level (not per-repo) effort still in progress.
-- 🔭 **`hugmesh-mod-ui`.** The paired Angular host that consumes this BFF's
-  OpenAPI spec (ng-openapi-gen typed client) is built later — see *Paired UI*.
 
 ## Build & test
 
@@ -927,14 +931,16 @@ The project's primary CI/CD runs on its internal, self-hosted GitLab — this
 GitHub repository is a pull-mirror of it, and `.gitlab-ci.yml` (below) is the
 source of truth for testing, security scanning, and building/pushing the
 container image. A manually-triggered `.github/workflows/release.yml` is also
-provided to publish images to GHCR (`ghcr.io/hugmesh-net/hugmesh-mod-bff-api`);
-it's currently inert until the private `hugmesh-commons` Maven dependency it
-needs at build time is reachable from GitHub Actions (see the workflow file for
-the exact blocker and how to unblock it). The container image itself (multi-stage
+provided to publish images to GHCR (`ghcr.io/hugmesh/hugmesh-mod-bff-api`). It runs on a
+GitHub-hosted runner and resolves the private `net.hugmesh` libraries
+(`hugmesh-build-config`, `hugmesh-parent`, `hugmesh-commons`) from GitHub Packages. It
+needs the repository secret `PACKAGES_READ_TOKEN` (a classic PAT with `read:packages`);
+without it the preflight step fails by name. The container image itself (multi-stage
 Temurin 25 JDK→JRE) carries no baked-in secrets — key material is provisioned
 separately at first boot.
 
-`.gitlab-ci.yml` defines four stages, in order: **`test`** (`./mvnw verify` in a
+`.gitlab-ci.yml` declares four stages, in order (the `security` stage has no job in this
+file): **`test`** (`./mvnw verify` in a
 Temurin 25 container, JUnit reports), **`security`**, **`build`** (build + push the
 container image to the in-cluster registry on the default branch / tag), and
 **`pentest`** — the **`security` / `pentest`** stages satisfy the platform's
@@ -965,9 +971,9 @@ src/main/java/net/hugmesh/modbff
   status/ModStatusController.java   GET /bff/mod/status — caller role/domain polling endpoint
   model/                            closed-vocabulary enums — PlatformKind (matrix|mastodon|profile) / ScopeKind (user|instance); typed lens over the existing String wire/DB form (byte-identical), replaces scattered string-literal branching
   auth/                             native-login bff_ session bridge — BffCookieAuthenticationWebFilter + AdminBffSessionIntrospectClient/Config (see *Native-login (bff_ session) support*)
-  federation/                       federation-api WebClient client + DTOs + bearer-forward filter + outbound mTLS + the native-login custody-exchange (SessionExchangeService/Client/Cache/Config, BffRawTokenContextWebFilter, ships dark behind app.bff-exchange.enabled)
+  federation/                       federation-api WebClient client + DTOs + bearer-forward filter + outbound mTLS + the native-login custody-exchange (SessionExchangeService/Client/Cache/Config, BffRawTokenContextWebFilter, off by default behind app.bff-exchange.enabled) + TestSeedFindingController (dark behind app.test-seed.enabled)
   admin/                            admin-bff suspension/domain-lock clients + Casdoor role lookup (org-map, belongsToDomain)
-  external/                         Matrix(tuwunel) admin-room command client (✅ wired, dark — posted, never ok) + Mastodon(akkoma) admin client (✅ wired, dark) + config
+  external/                         Matrix(tuwunel) instance-block request client (no HTTP; user deactivate removed, decision 83b) + Mastodon(akkoma) admin client (✅ wired, dark) + config
   owncast/                          owncast-bff moderation client (hide/kill/restore) + config
   audit/                            mod_action R2DBC repository + record + action types + dedup key
   notify/NotifyDirective.java       service-scoped @system notification directive (ships dark)
@@ -1003,8 +1009,8 @@ Issues and pull requests are welcome. A few things to know before you open one:
 - This repo builds against the shared `hugmesh-parent` metapom and `hugmesh-commons`
   library; platform-wide conventions (Casdoor auth, tenancy, mTLS) live there, not
   duplicated here.
-- See [`SECURITY.md`](SECURITY.md) for this service's authentication/mTLS model and
-  for how to report a vulnerability.
+- See [`SECURITY.md`](SECURITY.md) for this service's authentication/mTLS model. It has
+  no section on reporting a vulnerability.
 
 ## License
 
