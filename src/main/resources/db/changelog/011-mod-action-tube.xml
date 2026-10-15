@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+        xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+            http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.29.xsd">
+
+    <!--
+      Tube moderation events. This changeset makes the tube.hide verb FIRST-CLASS in the
+      mod_action central ledger. No new COLUMNS are needed; it only WIDENS the two CHECK
+      constraints last redefined in 010:
+
+        011a - action CHECK   (widen ck_mod_action_action with tube.hide)
+        011b - platform CHECK (widen ck_mod_action_platform with the 'tube' platform,
+                               a NON-homeserver platform, sibling of 'wiki'/'owncast')
+
+      Same portable DROP + re-ADD shape as 010; the rollback restores the 010 CHECKs.
+    -->
+
+    <changeSet id="011-mod-action-action-check-tube" author="hugmesh">
+        <comment>Widen ck_mod_action_action with the tube.hide verb.</comment>
+        <sql>ALTER TABLE mod_action DROP CONSTRAINT ck_mod_action_action</sql>
+        <sql>
+            ALTER TABLE mod_action
+                ADD CONSTRAINT ck_mod_action_action
+                CHECK (action IN (
+                    'matrix.block-user', 'matrix.block-instance',
+                    'mastodon.block-user', 'mastodon.block-instance',
+                    'federation.refer', 'federation.recommend',
+                    'federation.finding-resolve',
+                    'access.suspend', 'access.restore',
+                    'domain.lock', 'domain.unlock',
+                    'wiki.grant', 'wiki.timeout', 'wiki.ban', 'wiki.restore',
+                    'owncast.hide', 'owncast.kill', 'owncast.restore',
+                    'tube.hide'))
+        </sql>
+        <rollback>
+            <sql>ALTER TABLE mod_action DROP CONSTRAINT ck_mod_action_action</sql>
+            <sql>
+                ALTER TABLE mod_action
+                    ADD CONSTRAINT ck_mod_action_action
+                    CHECK (action IN (
+                        'matrix.block-user', 'matrix.block-instance',
+                        'mastodon.block-user', 'mastodon.block-instance',
+                        'federation.refer', 'federation.recommend',
+                        'federation.finding-resolve',
+                        'access.suspend', 'access.restore',
+                        'domain.lock', 'domain.unlock',
+                        'wiki.grant', 'wiki.timeout', 'wiki.ban', 'wiki.restore',
+                        'owncast.hide', 'owncast.kill', 'owncast.restore'))
+            </sql>
+        </rollback>
+    </changeSet>
+
+    <changeSet id="011-mod-action-platform-check-tube" author="hugmesh">
+        <comment>Widen ck_mod_action_platform with the 'tube' platform.</comment>
+        <sql>ALTER TABLE mod_action DROP CONSTRAINT ck_mod_action_platform</sql>
+        <sql>
+            ALTER TABLE mod_action
+                ADD CONSTRAINT ck_mod_action_platform
+                CHECK (platform IN ('matrix', 'mastodon', 'federation', 'access',
+                                    'domain-lock', 'wiki', 'owncast', 'tube'))
+        </sql>
+        <rollback>
+            <sql>ALTER TABLE mod_action DROP CONSTRAINT ck_mod_action_platform</sql>
+            <sql>
+                ALTER TABLE mod_action
+                    ADD CONSTRAINT ck_mod_action_platform
+                    CHECK (platform IN ('matrix', 'mastodon', 'federation', 'access',
+                                        'domain-lock', 'wiki', 'owncast'))
+            </sql>
+        </rollback>
+    </changeSet>
+</databaseChangeLog>

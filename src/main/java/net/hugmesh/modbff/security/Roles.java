@@ -167,6 +167,24 @@ public final class Roles {
         return false;
     }
 
+    /** The derived "tube moderator" capability: {@code ROLE_MOD} AND {@code ROLE_TUBE}
+     *  (the intersection, read off the converted authorities), or {@code ROLE_SUPERADMIN}
+     *  (the infra super-role, as in {@link #isSuperadmin(Authentication)}). It is DERIVED
+     *  here, never read from an authority of its own: a {@code ROLE_TUBE_MOD} authority
+     *  (e.g. a Casdoor role of that name) confers nothing, and neither role alone does.
+     *  Fail-closed: a {@code null} authentication is not a tube moderator. */
+    public static boolean isTubeMod(Authentication auth) {
+        if (auth == null) return false;
+        if (isSuperadmin(auth)) return true;
+        boolean mod = false;
+        boolean tube = false;
+        for (GrantedAuthority a : auth.getAuthorities()) {
+            if ("ROLE_MOD".equals(a.getAuthority())) mod = true;
+            if ("ROLE_TUBE".equals(a.getAuthority())) tube = true;
+        }
+        return mod && tube;
+    }
+
     /** The brand/domain this principal is scoped to, derived from the token ISSUER
      *  (per-brand Casdoor =&gt; distinct {@code iss}) through the SAME registry the
      *  converter uses. Returns {@code "default"} for the single-issuer fallback so
