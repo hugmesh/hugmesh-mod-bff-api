@@ -85,6 +85,25 @@ class RolesTest {
         }
 
         @Test
+        void isTubeMod_isModAndTube_orSuperadmin() {
+            assertThat(Roles.isTubeMod(auth(
+                    new SimpleGrantedAuthority("ROLE_MOD"),
+                    new SimpleGrantedAuthority("ROLE_TUBE")))).isTrue();
+            assertThat(Roles.isTubeMod(auth(new SimpleGrantedAuthority("ROLE_SUPERADMIN")))).isTrue();
+            assertThat(Roles.isTubeMod(auth(new SimpleGrantedAuthority("ROLE_MOD")))).isFalse();
+            assertThat(Roles.isTubeMod(auth(new SimpleGrantedAuthority("ROLE_TUBE")))).isFalse();
+            assertThat(Roles.isTubeMod(auth(
+                    new SimpleGrantedAuthority("ROLE_ADMIN"),
+                    new SimpleGrantedAuthority("ROLE_TUBE")))).isFalse();
+            assertThat(Roles.isTubeMod((Authentication) null)).isFalse();
+        }
+
+        @Test
+        void isTubeMod_aRoleNamedTubeMod_confersNothing() {
+            assertThat(Roles.isTubeMod(auth(new SimpleGrantedAuthority("ROLE_TUBE_MOD")))).isFalse();
+        }
+
+        @Test
         void domainOf_jwt_viaRegistry_singleIssuerIsDefault() {
             DomainRegistry reg = new DomainRegistry("https://id.hugmesh.net", "");
             Jwt jwt = jwtWithIssuer("https://id.hugmesh.net", Map.of("roles", List.of("mod")));

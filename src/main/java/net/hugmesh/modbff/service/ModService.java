@@ -2,6 +2,7 @@ package net.hugmesh.modbff.service;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.GrantedAuthority;
@@ -26,6 +27,7 @@ import net.hugmesh.modbff.model.PlatformKind;
 import net.hugmesh.modbff.model.ScopeKind;
 import net.hugmesh.modbff.notify.NotifyDirective;
 import net.hugmesh.modbff.owncast.OwncastModClient;
+import net.hugmesh.modbff.tube.TubeModClient;
 import net.hugmesh.commons.security.DomainRegistry;
 import net.hugmesh.modbff.security.Roles;
 import net.hugmesh.commons.web.ApiException;
@@ -75,6 +77,10 @@ public class ModService {
     private final MatrixAdminClient matrix;
     private final MastodonAdminClient mastodon;
     private final OwncastModClient owncast;
+    /** tube moderation effector; {@code null} until an implementation is registered
+     *  (tube-bff-api has no moderation endpoint yet), in which case {@code tubeHide}
+     *  refuses to run. */
+    private final TubeModClient tube;
     /** federation-api client for the Matrix instance-block approval trail (decisions
      *  84a-d); {@code null} only through the legacy 7-arg constructor. */
     private final FederationApiClient federation;
@@ -100,7 +106,17 @@ public class ModService {
     public ModService(AdminSuspensionClient suspensions, AdminDomainLockClient domainLocks,
                       CasdoorRoleClient roles, ModActionRepository audit,
                       MatrixAdminClient matrix, MastodonAdminClient mastodon,
-                      OwncastModClient owncast, FederationApiClient federation) {
+                      OwncastModClient owncast, FederationApiClient federation,
+                      ObjectProvider<TubeModClient> tube) {
+        this(suspensions, domainLocks, roles, audit, matrix, mastodon, owncast, federation,
+                tube.getIfAvailable());
+    }
+
+    public ModService(AdminSuspensionClient suspensions, AdminDomainLockClient domainLocks,
+                      CasdoorRoleClient roles, ModActionRepository audit,
+                      MatrixAdminClient matrix, MastodonAdminClient mastodon,
+                      OwncastModClient owncast, FederationApiClient federation,
+                      TubeModClient tube) {
         this.suspensions = suspensions;
         this.domainLocks = domainLocks;
         this.roles = roles;
@@ -109,6 +125,16 @@ public class ModService {
         this.mastodon = mastodon;
         this.owncast = owncast;
         this.federation = federation;
+        this.tube = tube;
+    }
+
+    /** The 8-arg form, kept so existing hand-wired tests compile unchanged: no tube client. */
+    public ModService(AdminSuspensionClient suspensions, AdminDomainLockClient domainLocks,
+                      CasdoorRoleClient roles, ModActionRepository audit,
+                      MatrixAdminClient matrix, MastodonAdminClient mastodon,
+                      OwncastModClient owncast, FederationApiClient federation) {
+        this(suspensions, domainLocks, roles, audit, matrix, mastodon, owncast, federation,
+                (TubeModClient) null);
     }
 
     /**
@@ -121,7 +147,8 @@ public class ModService {
                       CasdoorRoleClient roles, ModActionRepository audit,
                       MatrixAdminClient matrix, MastodonAdminClient mastodon,
                       OwncastModClient owncast) {
-        this(suspensions, domainLocks, roles, audit, matrix, mastodon, owncast, null);
+        this(suspensions, domainLocks, roles, audit, matrix, mastodon, owncast, null,
+                (TubeModClient) null);
     }
 
     // ── BAN (write access_suspension desired-state) ────────────────────
@@ -737,6 +764,36 @@ public class ModService {
                 .map(recorded -> new OwncastModResult(recorded, outcome)));
     }
 
+    // ── TUBE moderation (TubeModClient effector + central ledger row) ──
+    /**
+     * HIDE the target owner's tube content and record a {@code tube.hide} row in the
+     * central ledger. The caller must be a tube moderator ({@link Roles#isTubeMod}: MOD
+     * and TUBE), checked FIRST; then the punitive-action guards run ({@code guardNotSelf}
+     * &rarr; {@code guardSameTenant} &rarr; {@code guardNotPrivileged}), all BEFORE the
+     * effector call or ledger row. With no {@link TubeModClient} registered nothing runs
+     * and nothing is ledgered. The ledger row records the HONEST effector outcome
+     * ({@code ok} / {@code degraded:<reason>}); an effector error (e.g. no such content)
+     * writes no row.
+     */
+    public Mono<TubeModResult> tubeHide(String target, String reason, Authentication auth) {
+        if (!Roles.isTubeMod(auth)) {
+            return Mono.error(ApiException.forbidden("tube moderation requires ROLE_MOD and ROLE_TUBE"));
+        }
+        if (tube == null) {
+            return Mono.error(new IllegalStateException("tube moderation is not configured"));
+        }
+        String actor = actor(auth);
+        String domain = domain(auth);
+        boolean superadmin = Roles.isSuperadmin(auth);
+        return guardNotSelf(actor, target)
+                .then(Mono.defer(() -> guardSameTenant(target, domain, superadmin)))
+                .then(Mono.defer(() -> guardNotPrivileged(target, domain, superadmin)))
+                .then(Mono.defer(() -> tube.hide(target, reason)))
+                .flatMap(outcome -> audit.record(actor, ModActionType.TUBE_HIDE, "tube", target,
+                                reason, outcome.result(), domain)
+                        .map(recorded -> new TubeModResult(recorded, outcome)));
+    }
+
     private static String blockActionFor(String platform, boolean user) {
         // matrix → the matrix.block-* verb; anything else (mastodon, the only other value the
         // BlockRequest @Pattern permits) → the mastodon.block-* verb — identical to the prior
@@ -994,6 +1051,15 @@ public class ModService {
                         + "NO reconcile loop on this surface: retry once owncast-bff is healthy");
             }
             return out;
+        }
+    }
+
+    /** The outcome of a tube hide + the persisted central-ledger row. Like the owncast
+     *  effect it is SYNCHRONOUS: only an {@link BlockOutcome#isOk() ok} outcome is applied. */
+    public record TubeModResult(ModAction action, BlockOutcome outcome) {
+
+        public boolean applied() {
+            return outcome.isOk();
         }
     }
 }
