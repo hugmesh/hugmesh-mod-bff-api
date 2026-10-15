@@ -1,7 +1,7 @@
 # hugmesh-mod-bff-api
 
 Moderator Backend-For-Frontend (BFF) for the HugMesh platform. It is the
-**MODERATOR-scoped** (Casdoor `ROLE_MOD` or `ROLE_ADMIN`) sibling of the future
+**MODERATOR-scoped** (Casdoor `ROLE_MOD` or `ROLE_ADMIN`) sibling of
 `hugmesh-mod-ui`, and the role analog of `hugmesh-admin-bff-api` — but with a
 deliberately **narrow** surface. A moderator triages reports, records recommendations,
 escalates to admins, issues server-wide blocks, writes access-role bans, and
@@ -57,7 +57,7 @@ security/tenancy code); conventions copied verbatim from `hugmesh-admin-bff-api`
   BFF **unswapped**, so this BFF resolves the session itself. See *Native-login
   (`bff_` session) support* below.
 
-Topology (solid = ✅ shipped call path; dashed = 🔭 planned component; the akkoma
+Topology (solid = ✅ shipped call path; the akkoma
 block leg is ✅ wired-but-dark — real HTTP when enabled. There is no tuwunel edge: a
 Matrix user block is a reversible domain-lock written through admin-bff, a Matrix
 instance block is a request filed with federation-api, and the one-way Matrix
@@ -66,7 +66,7 @@ deactivate lives in admin-bff since decision 83b):
 ```mermaid
 flowchart LR
     mod(["Moderator (Casdoor JWT)"])
-    ui["hugmesh-mod-ui<br/>(planned)"]
+    ui["hugmesh-mod-ui"]
     gw["fe-gateway<br/>(bff_→JWT swap + route-access + bearer fwd)"]
     bff["hugmesh-mod-bff-api<br/>/bff/mod/**"]
     audit[("mod_action<br/>(R2DBC, owned)")]
@@ -85,9 +85,6 @@ flowchart LR
     bff -->|"bearer fwd + mTLS<br/>hide/kill/restore"| owncast
     bff -->|"target role / org lookup"| casdoor
     bff -->|"block (✅ wired, dark by default)"| akkoma
-
-    classDef planned stroke-dasharray:4,stroke:#888;
-    class ui planned;
 ```
 
 ### Part of the HugMesh platform
@@ -117,8 +114,8 @@ directly, or that it's the sibling of:
 - [`hugmesh-generator`](https://github.com/hugmesh/hugmesh-generator) — cluster
   manifests, deployment tooling, and the shared pen-test CI stage this repo's pipeline
   extends.
-- `hugmesh-mod-ui` — the moderator-facing Angular front end for this BFF. Planned; not
-  yet published.
+- `hugmesh-mod-ui` — the moderator-facing Angular front end for this BFF. Its typed
+  client is generated from this repo's committed `openapi.json` (see *Paired UI*).
 
 ## What it does
 
@@ -687,8 +684,9 @@ behaviour end-to-end through the real filter chain.
 
 ## Paired UI
 
-`hugmesh-mod-ui` (built later) is the Angular host that consumes this BFF's
-OpenAPI spec (ng-openapi-gen typed client) and renders the moderation queue, the
+[`hugmesh-mod-ui`](https://github.com/hugmesh/hugmesh-mod-ui) is the Angular host that consumes this BFF's
+OpenAPI spec (ng-openapi-gen typed client; its `npm run gen:spec` copies this repo's committed
+`src/main/resources/openapi/openapi.json`) and renders the moderation queue, the
 refer-to-admin action, the server-wide block form, and the federation modules it
 delivers — the moderator analog of admin-ui ↔ admin-bff.
 
@@ -909,8 +907,11 @@ work as done:
   session bridge — see *Native-login (`bff_` session) support*) and needs no
   further code change beyond verification coverage; the cross-realm security e2e
   suite itself is a platform-level (not per-repo) effort still in progress.
-- 🔭 **`hugmesh-mod-ui`.** The paired Angular host that consumes this BFF's
-  OpenAPI spec (ng-openapi-gen typed client) is built later — see *Paired UI*.
+- ✅ **`hugmesh-mod-ui`.** The paired Angular host that consumes this BFF's
+  OpenAPI spec (ng-openapi-gen typed client) exists as `hugmesh/hugmesh-mod-ui`
+  (`@hugmesh/mod`, a native-federation remote; merged PRs there include #17 the step-up
+  dialog (landed inert), #19 the step-up e2e loop and #20 the superadmin / block-request console) — see
+  *Paired UI*.
 
 ## Build & test
 
