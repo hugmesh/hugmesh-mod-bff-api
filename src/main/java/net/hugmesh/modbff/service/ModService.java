@@ -240,7 +240,7 @@ public class ModService {
      * Build the dedup key, record the domain-lock row, and then either skip (dedup hit)
      * or call lock() to forward the desired-state to admin-bff.
      */
-    private Mono<LockResult> recordAndApplyLock(String role, String platform, String target,
+    private Mono<LockResult> recordAndApplyLock(String role, String target,
                                                 String reason, String actor, String domain, String idempotencyKey) {
         // Build a dedup key scoped to this actor, target, domain, and idempotency token.
         String dedupKey = ModActionKey.ban(ModActionType.DOMAIN_LOCK, role, target, actor, domain, idempotencyKey);
@@ -248,7 +248,7 @@ public class ModService {
         return audit.recordBan(dedupKey, actor, ModActionType.DOMAIN_LOCK, "domain-lock",
                         target, reason, "user", null, "pending", domain)
                 // Delegate the fresh-vs-dedup decision and the actual lock write to a named helper.
-                .flatMap(recorded -> applyLockOrDedup(recorded, role, platform, target, reason));
+                .flatMap(recorded -> applyLockOrDedup(recorded, role, target, reason));
     }
 
     /**
@@ -257,7 +257,7 @@ public class ModService {
      * recordAndApplyLock flatMap body within the 10-line Checkstyle limit.
      */
     private Mono<LockResult> applyLockOrDedup(ModActionRepository.RecordedBan recorded,
-                                              String role, String platform, String target, String reason) {
+                                              String role, String target, String reason) {
         // Dedup hit: the lock() was already issued; return the persisted pending row.
         if (!recorded.fresh()) {
             log.info("[domain-lock] dedup hit — role={} target={} already recorded (id={})",
@@ -265,7 +265,7 @@ public class ModService {
             return Mono.just(LockResult.pending(recorded.action(), true));
         }
         // Fresh row: forward the lock desired-state to admin-bff and map the outcome.
-        return domainLocks.lock(platform, target, reason)
+        return domainLocks.lock(role, target, reason)
                 .map(outcome -> LockResult.of(recorded.action(), outcome, false));
     }
 
@@ -273,7 +273,7 @@ public class ModService {
      * Build the dedup key, record the domain-unlock row, and then either skip (dedup hit)
      * or call unlock() to forward the desired-state to admin-bff.
      */
-    private Mono<LockResult> recordAndApplyUnlock(String role, String platform, String target,
+    private Mono<LockResult> recordAndApplyUnlock(String role, String target,
                                                   String actor, String domain, String idempotencyKey) {
         // Build a dedup key scoped to this actor, target, domain, and idempotency token.
         String dedupKey = ModActionKey.ban(ModActionType.DOMAIN_UNLOCK, role, target, actor, domain, idempotencyKey);
@@ -286,7 +286,7 @@ public class ModService {
                         return Mono.just(LockResult.pending(recorded.action(), true));
                     }
                     // Fresh row: forward the unlock desired-state to admin-bff and map the outcome.
-                    return domainLocks.unlock(platform, target)
+                    return domainLocks.unlock(role, target)
                             .map(outcome -> LockResult.of(recorded.action(), outcome, false));
                 });
     }
@@ -495,8 +495,8 @@ public class ModService {
      * recommendation): a MOD-initiated Matrix USER block must be REVERSIBLE end to end.
      * tuwunel's only user-block verb is the one-way {@code !admin users deactivate} (no
      * {@code activate} exists), so this never drives a deactivate. Instead it writes the
-     * SAME {@code domain_lock} desired-state {@link #domainLock} does (force local-only / no-federation on the
-     * {@code matrix} platform) — which {@code DELETE
+     * SAME {@code domain_lock} desired-state {@link #domainLock} does (force local-only /
+     * no-federation, keyed by {@code ROLE_MATRIX_DOMAINLOCKED}) — which {@code DELETE
      * /bff/mod/domain-lock/ROLE_MATRIX_DOMAINLOCKED/{user}} ({@link #domainUnlock}, via
      * {@link AdminDomainLockClient#unlock}) already reverses. <b>This REVERSES decision
      * 5</b> ("ANSWERED 2026-09-10: deactivate", hugmesh-mod-bff-api#1) for the MOD path
@@ -514,7 +514,7 @@ public class ModService {
      * breaker fallback, never {@link BlockOutcome#isOk()}).
      */
     private Mono<BlockOutcome> matrixUserBlock(String target, String reason) {
-        return domainLocks.lock("matrix", target, reason)
+        return domainLocks.lock(AdminDomainLockClient.ROLE_MATRIX_DOMAINLOCKED, target, reason)
                 .map(outcome -> outcome.isDegraded()
                         ? BlockOutcome.degraded(outcome.state().substring("degraded:".length()))
                         : BlockOutcome.DOMAIN_LOCKED);
@@ -558,12 +558,12 @@ public class ModService {
         String actor = actor(auth);
         String domain = domain(auth);
         boolean superadmin = Roles.isSuperadmin(auth);
-        String platform = platformForDomainLockRole(role);
+        String lockRole = requireDomainLockRole(role);
         return guardNotSelf(actor, target)
                 .then(Mono.defer(() -> guardSameTenant(target, domain, superadmin)))
                 .then(Mono.defer(() -> guardNotPrivileged(target, domain, superadmin)))
                 // Record the deduped audit row and apply (or skip) the domain-lock desired-state write.
-                .then(Mono.defer(() -> recordAndApplyLock(role, platform, target, reason, actor, domain, idempotencyKey)));
+                .then(Mono.defer(() -> recordAndApplyLock(lockRole, target, reason, actor, domain, idempotencyKey)));
     }
 
     /**
@@ -576,24 +576,26 @@ public class ModService {
         String actor = actor(auth);
         String domain = domain(auth);
         boolean superadmin = Roles.isSuperadmin(auth);
-        String platform = platformForDomainLockRole(role);
+        String lockRole = requireDomainLockRole(role);
         return guardNotSelf(actor, target)
                 .then(Mono.defer(() -> guardSameTenant(target, domain, superadmin)))
                 .then(Mono.defer(() -> guardNotPrivileged(target, domain, superadmin)))
                 // Record the deduped audit row and apply (or skip) the domain-unlock desired-state write.
-                .then(Mono.defer(() -> recordAndApplyUnlock(role, platform, target, actor, domain, idempotencyKey)));
+                .then(Mono.defer(() -> recordAndApplyUnlock(lockRole, target, actor, domain, idempotencyKey)));
     }
 
     /**
-     * Map the domain-lock MARKER role to the admin-bff domain-lock PLATFORM key.
-     * {@code ROLE_MATRIX_DOMAINLOCKED}→{@code matrix}, {@code ROLE_MASTODON_DOMAINLOCKED}
-     * →{@code mastodon}. Any other value is a 400 (the controller also {@code @Pattern}s
-     * the path variable to exactly these two roles — defence in depth).
+     * Validate the domain-lock MARKER role and return it unchanged: admin-bff keys its
+     * {@code domain_lock} surface by the role itself ({@code ROLE_MATRIX_DOMAINLOCKED} |
+     * {@code ROLE_MASTODON_DOMAINLOCKED}), NOT by a {@code matrix|mastodon} platform name
+     * (a platform name in that path segment is a 400 there, hugmesh-mod-bff-api#26). Any
+     * other value is a 400 here (the controller also {@code @Pattern}s the path variable to
+     * exactly these two roles — defence in depth).
      */
-    static String platformForDomainLockRole(String role) {
+    static String requireDomainLockRole(String role) {
         return switch (role == null ? "" : role) {
-            case "ROLE_MATRIX_DOMAINLOCKED"   -> "matrix";
-            case "ROLE_MASTODON_DOMAINLOCKED" -> "mastodon";
+            case AdminDomainLockClient.ROLE_MATRIX_DOMAINLOCKED,
+                 AdminDomainLockClient.ROLE_MASTODON_DOMAINLOCKED -> role;
             default -> throw ApiException.badRequest("unknown domain-lock role: " + role);
         };
     }

@@ -195,7 +195,7 @@ their `ROLE_MATRIX`/`ROLE_MASTODON` access (the fe-gateway routes are **untouche
 the marker merely flags the homeserver/egress reconcile to force their deliveries
 local. Because that is the *opposite* of the REMOVE-semantics suspension, it is a
 **separate** `domain_lock` table in admin-bff (never overloading `access_suspension`),
-written via `POST/DELETE /bff/admin/domain-lock/{platform}/{user}` through a dedicated
+written via `POST/DELETE /bff/admin/domain-lock/{role}/{user}` through a dedicated
 `AdminDomainLockClient` (same mTLS + bearer-forwarding + `@CircuitBreaker` as the
 suspension client). Same delegation guards as a ban — a MOD may **not** domain-lock
 themselves, nor a `ROLE_ADMIN`/`ROLE_MOD` target, nor a target outside the caller's
@@ -269,7 +269,7 @@ sequenceDiagram
 - **admin-bff** (`hugmesh-admin-bff-api`) — the ban/lift surface writes the
   `access_suspension` desired-state via `POST/DELETE /bff/admin/access-roles/{role}/{user}`,
   and the domain-lock surface writes the SEPARATE `domain_lock` desired-state via
-  `POST/DELETE /bff/admin/domain-lock/{platform}/{user}` (the `AdminDomainLockClient`,
+  `POST/DELETE /bff/admin/domain-lock/{role}/{user}` (the `AdminDomainLockClient`,
   sibling of `AdminSuspensionClient`) (in-cluster default
   `http://hugmesh-admin-bff-api.hugmesh-backend.svc.cluster.local:8080`,
   override `ADMIN_BFF_BASE_URL`). Both reuse the same mTLS client-presentation
