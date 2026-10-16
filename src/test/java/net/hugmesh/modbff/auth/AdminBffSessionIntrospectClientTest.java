@@ -110,4 +110,25 @@ class AdminBffSessionIntrospectClientTest {
                 .assertNext(intro -> assertThat(intro.mfaSatisfied()).isTrue())
                 .verifyComplete();
     }
+
+    /** Two values for one key are ambiguous: the decode fails (closed) instead of the last
+     *  value winning, whichever order they come in. */
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {
+            "{\"id\":\"casdoor:u\",\"provider\":\"casdoor\",\"roles\":[\"mod\"],\"registrationComplete\":true,"
+                    + "\"status\":\"suspended\",\"status\":\"active\",\"mfaSatisfied\":true}",
+            "{\"id\":\"casdoor:u\",\"provider\":\"casdoor\",\"roles\":[\"mod\"],\"registrationComplete\":true,"
+                    + "\"status\":\"active\",\"status\":\"active\",\"mfaSatisfied\":true}",
+            "{\"id\":\"casdoor:u\",\"provider\":\"casdoor\",\"roles\":[\"user\"],\"roles\":[\"superadmin\"],"
+                    + "\"registrationComplete\":true,\"status\":\"active\",\"mfaSatisfied\":true}"})
+    void introspect_duplicateKey_isAnError_notTheLastValue(String body) {
+        Recorder rec = new Recorder();
+        rec.next = ClientResponse.create(HttpStatus.OK)
+                .header(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
+                .body(body)
+                .build();
+        AdminBffSessionIntrospectClient client = new AdminBffSessionIntrospectClient(web(rec));
+
+        StepVerifier.create(client.introspect("bff_dup")).expectError().verify();
+    }
 }

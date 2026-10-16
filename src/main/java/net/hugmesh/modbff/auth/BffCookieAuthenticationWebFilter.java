@@ -68,8 +68,11 @@ import java.util.Locale;
  * role maps to {@code ROLE_<UPPER>}, deduplicated against the floor;
  * {@code MFA_SATISFIED} is added when the introspect response reports it.
  *
- * <h3>Suspended/banned accounts — explicit deny, mirroring the gateway</h3>
- * admin-bff's introspect body may report {@code status: "suspended"|"banned"} on a
+ * <h3>Account status — allow-list; suspended/banned/unknown are an explicit deny</h3>
+ * Authorities are granted only when {@code status} is {@code "active"} (case-insensitive); a
+ * missing, blank or unrecognized status is refused {@code 403} +
+ * {@code X-Bff-Denied: account-status-unrecognized}. The rest of this section describes the
+ * suspended/banned case. admin-bff's introspect body may report {@code status: "suspended"|"banned"} on a
  * still-live session (the suspension check is live, not cached). Exactly like the
  * gateway's own filter, this is an explicit {@code 403} — the exchange is completed
  * directly and {@code chain.filter(exchange)} is NEVER called on this branch — rather
@@ -162,6 +165,10 @@ public class BffCookieAuthenticationWebFilter implements WebFilter {
      *  filter (forbidden branch only) — mirrors the gateway's X-BFF-Denied. */
     private static final String DENIED_HEADER = "X-Bff-Denied";
 
+    /** {@code X-Bff-Denied} reason suffix for a status that is missing or not one of
+     *  active/suspended/banned. Constant on purpose: the raw status is never echoed. */
+    static final String UNRECOGNIZED_STATUS_REASON = "status-unrecognized";
+
     private final ObjectProvider<AdminBffSessionIntrospectClient> clients;
     private final long timeoutMs;
 
@@ -223,11 +230,41 @@ public class BffCookieAuthenticationWebFilter implements WebFilter {
     /** Package-private (not private) so a unit test can exercise the mapping directly. */
     static Decision decide(BffSessionIntrospection intro) {
         String status = intro.status();
-        if ("suspended".equalsIgnoreCase(status) || "banned".equalsIgnoreCase(status)) {
-            log.warn("[bff-cookie-auth] denied — account status={} id={}", status, intro.id());
-            return Decision.forbidden(status.toLowerCase(Locale.ROOT));
+        // ALLOW-LIST: authorities are granted ONLY for an explicit "active". suspended/banned
+        // keep their specific reason; a missing, blank, padded or unrecognized status is refused
+        // with a constant reason (the raw, backend-supplied status is never echoed to a header).
+        // Comparison is ASCII-only: String.equalsIgnoreCase folds U+0130 (dotted capital I) to
+        // 'i' and U+017F (long s) to 's', so it would accept a non-ASCII lookalike of "active"
+        // and echo a lookalike of "suspended" into the denial header.
+        if (asciiEqualsIgnoreCase(status, "active")) {
+            return Decision.authenticate(authenticationFor(intro));
         }
-        return Decision.authenticate(authenticationFor(intro));
+        if (asciiEqualsIgnoreCase(status, "suspended") || asciiEqualsIgnoreCase(status, "banned")) {
+            String reason = asciiEqualsIgnoreCase(status, "banned") ? "banned" : "suspended";
+            log.warn("[bff-cookie-auth] denied — account status={} id={}", reason, intro.id());
+            return Decision.forbidden(reason);
+        }
+        log.warn("[bff-cookie-auth] denied — unrecognized account status (blank={}) id={}",
+                status == null || status.isBlank(), intro.id());
+        return Decision.forbidden(UNRECOGNIZED_STATUS_REASON);
+    }
+
+    /** True when {@code value} equals {@code expected} (lower-case ASCII) ignoring ASCII case
+     *  only. */
+    static boolean asciiEqualsIgnoreCase(String value, String expected) {
+        if (value == null || value.length() != expected.length()) {
+            return false;
+        }
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (c >= 'A' && c <= 'Z') {
+                c = (char) (c + ('a' - 'A'));
+            }
+            if (c != expected.charAt(i)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static Decision failClosed(Throwable ex) {
