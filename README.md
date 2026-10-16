@@ -894,6 +894,11 @@ as done:
   see *Native-login (`bff_` session) support*). It needs no further code change beyond
   verification coverage. The cross-realm security e2e suite itself is a platform-level
   (not per-repo) effort, still in progress.
+- ✅ **`hugmesh-mod-ui`.** The paired Angular console that consumes this BFF's OpenAPI spec
+  (ng-openapi-gen typed client) exists as `hugmesh/hugmesh-mod-ui` (`@hugmesh/mod`, a
+  native-federation remote). Merged PRs there include #17 (the step-up dialog, landed
+  inert), #19 (the step-up e2e loop) and #20 (the superadmin / block-request console).
+  See *Paired UI*.
 
 ## Build & test
 
