@@ -273,8 +273,8 @@ class ModServiceTest {
                     assertThat(r.deduped()).isFalse();
                 })
                 .verifyComplete();
-        // ROLE_MASTODON_DOMAINLOCKED → 'mastodon' platform desired-state write with the reason.
-        verify(domainLocks).lock(eq("mastodon"), eq("alice"), eq("abuse"));
+        // ROLE_MASTODON_DOMAINLOCKED → the SAME role keys the admin-bff desired-state write with the reason.
+        verify(domainLocks).lock(eq("ROLE_MASTODON_DOMAINLOCKED"), eq("alice"), eq("abuse"));
     }
 
     // ── breaker-open / degraded admin-bff → still pending (never success) ──
@@ -283,7 +283,7 @@ class ModServiceTest {
         when(audit.recordBan(anyString(), anyString(), eq("domain.lock"), eq("domain-lock"), anyString(),
                 any(), any(), any(), anyString(), anyString()))
                 .thenReturn(Mono.just(new ModActionRepository.RecordedBan(row("domain.lock"), true)));
-        when(domainLocks.lock(eq("matrix"), eq("alice"), any()))
+        when(domainLocks.lock(eq("ROLE_MATRIX_DOMAINLOCKED"), eq("alice"), any()))
                 .thenReturn(Mono.just(SuspensionOutcome.degraded("CallNotPermittedException")));
         StepVerifier.create(service.domainLock(
                         "ROLE_MATRIX_DOMAINLOCKED", "alice", null, null, auth("mod:bob", "ROLE_MOD")))
@@ -321,7 +321,7 @@ class ModServiceTest {
                         "ROLE_MATRIX_DOMAINLOCKED", "alice", null, auth("mod:bob", "ROLE_MOD")))
                 .assertNext(r -> assertThat(r.state()).isEqualTo("pending-reconcile"))
                 .verifyComplete();
-        verify(domainLocks).unlock("matrix", "alice");
+        verify(domainLocks).unlock("ROLE_MATRIX_DOMAINLOCKED", "alice");
     }
 
     // ── unlock honours the below-them guard too (mod-unlocks-admin → 403) ─
@@ -335,16 +335,16 @@ class ModServiceTest {
         verify(domainLocks, never()).unlock(anyString(), anyString());
     }
 
-    // ── role→platform mapper (defence-in-depth for the {role} path var) ─
+    // ── role validator (defence-in-depth for the {role} path var; admin-bff keys by ROLE) ─
     @Test
-    void platformForDomainLockRole_mapsBothRoles() {
-        assertThat(ModService.platformForDomainLockRole("ROLE_MATRIX_DOMAINLOCKED")).isEqualTo("matrix");
-        assertThat(ModService.platformForDomainLockRole("ROLE_MASTODON_DOMAINLOCKED")).isEqualTo("mastodon");
+    void requireDomainLockRole_returnsBothRolesUnchanged_neverAPlatformName() {
+        assertThat(ModService.requireDomainLockRole("ROLE_MATRIX_DOMAINLOCKED")).isEqualTo("ROLE_MATRIX_DOMAINLOCKED");
+        assertThat(ModService.requireDomainLockRole("ROLE_MASTODON_DOMAINLOCKED")).isEqualTo("ROLE_MASTODON_DOMAINLOCKED");
     }
 
     @Test
-    void platformForDomainLockRole_unknownRole_throws400() {
-        assertThatThrownBy(() -> ModService.platformForDomainLockRole("ROLE_BOGUS"))
+    void requireDomainLockRole_unknownRole_throws400() {
+        assertThatThrownBy(() -> ModService.requireDomainLockRole("ROLE_BOGUS"))
                 .isInstanceOf(ApiException.class)
                 .satisfies(e -> assertThat(((ApiException) e).status().value()).isEqualTo(400));
     }
@@ -570,7 +570,7 @@ class ModServiceTest {
                 .assertNext(r -> assertThat(r.outcome()).isEqualTo(
                         net.hugmesh.modbff.external.BlockOutcome.DOMAIN_LOCKED))
                 .verifyComplete();
-        verify(domainLocks).lock("matrix", "@spam:evil", "abuse");
+        verify(domainLocks).lock("ROLE_MATRIX_DOMAINLOCKED", "@spam:evil", "abuse");
         verifyNoInteractions(matrix);
         // BUG-B mirror: the block row is stamped with the caller's validated brand.
         verify(audit).record(eq("mod:x"), eq("matrix.block-user"), eq("matrix"),

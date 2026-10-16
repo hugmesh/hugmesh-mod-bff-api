@@ -26,12 +26,14 @@ import java.util.Map;
  * overloading unsafe), reached through a SEPARATE endpoint.
  *
  * <p>Endpoints (matched to the admin-bff {@code AdminController} domain-lock surface,
- * which is keyed by {@code platform = matrix|mastodon}):
+ * which is keyed by the domain-lock MARKER ROLE, {@code role =
+ * ROLE_MATRIX_DOMAINLOCKED|ROLE_MASTODON_DOMAINLOCKED}, {@code @Pattern}-validated there; a
+ * {@code matrix}/{@code mastodon} platform name in that segment is a 400):
  * <ul>
- *   <li>{@code POST   /bff/admin/domain-lock/{platform}/{user}} — write an active
+ *   <li>{@code POST   /bff/admin/domain-lock/{role}/{user}} — write an active
  *       {@code domain_lock} row (+ optional {@code reason}) and trigger a reconcile
  *       tick (LOCK).</li>
- *   <li>{@code DELETE /bff/admin/domain-lock/{platform}/{user}} — CAS the active row to
+ *   <li>{@code DELETE /bff/admin/domain-lock/{role}/{user}} — CAS the active row to
  *       removed + reconcile (UNLOCK).</li>
  * </ul>
  *
@@ -51,6 +53,11 @@ import java.util.Map;
  */
 public class AdminDomainLockClient {
 
+    /** The domain-lock marker role admin-bff keys its Matrix domain locks by. */
+    public static final String ROLE_MATRIX_DOMAINLOCKED = "ROLE_MATRIX_DOMAINLOCKED";
+    /** The domain-lock marker role admin-bff keys its Mastodon domain locks by. */
+    public static final String ROLE_MASTODON_DOMAINLOCKED = "ROLE_MASTODON_DOMAINLOCKED";
+
     private static final Logger log = LoggerFactory.getLogger(AdminDomainLockClient.class);
 
     private final WebClient http;
@@ -65,44 +72,44 @@ public class AdminDomainLockClient {
      * apply it); a breaker-open/errored admin-bff returns {@code degraded:...} via the
      * {@link #lockFallback fallback} — never a success.
      *
-     * @param platform {@code matrix} | {@code mastodon}
+     * @param role     {@link #ROLE_MATRIX_DOMAINLOCKED} | {@link #ROLE_MASTODON_DOMAINLOCKED}
      * @param user     the user being domain-locked (forced local-only)
      * @param reason   optional audit note
      */
     @CircuitBreaker(name = "admin-bff", fallbackMethod = "lockFallback")
-    public Mono<SuspensionOutcome> lock(String platform, String user, String reason) {
+    public Mono<SuspensionOutcome> lock(String role, String user, String reason) {
         Map<String, Object> body = new LinkedHashMap<>();
         if (reason != null) body.put("reason", reason);
         return http.post()
-                .uri("/bff/admin/domain-lock/{platform}/{user}", platform, user)
+                .uri("/bff/admin/domain-lock/{role}/{user}", role, user)
                 .bodyValue(body)
                 .retrieve()
                 .toBodilessEntity()
-                .doOnSuccess(r -> log.info("[admin-bff] domain-lock WRITTEN platform={} user={}", platform, user))
+                .doOnSuccess(r -> log.info("[admin-bff] domain-lock WRITTEN role={} user={}", role, user))
                 .thenReturn(SuspensionOutcome.PENDING);
     }
 
     /** Clear the active domain-lock (UNLOCK). Same degraded-not-success contract as {@link #lock}. */
     @CircuitBreaker(name = "admin-bff", fallbackMethod = "unlockFallback")
-    public Mono<SuspensionOutcome> unlock(String platform, String user) {
+    public Mono<SuspensionOutcome> unlock(String role, String user) {
         return http.delete()
-                .uri("/bff/admin/domain-lock/{platform}/{user}", platform, user)
+                .uri("/bff/admin/domain-lock/{role}/{user}", role, user)
                 .retrieve()
                 .toBodilessEntity()
-                .doOnSuccess(r -> log.info("[admin-bff] domain-lock CLEARED platform={} user={}", platform, user))
+                .doOnSuccess(r -> log.info("[admin-bff] domain-lock CLEARED role={} user={}", role, user))
                 .thenReturn(SuspensionOutcome.PENDING);
     }
 
     // ── Circuit-breaker fallbacks (degraded, never success) ────────────
     @SuppressWarnings("unused")
-    private Mono<SuspensionOutcome> lockFallback(String platform, String user, String reason, Throwable t) {
-        log.warn("[admin-bff] domain-lock WRITE degraded platform={} user={} — {}", platform, user, t.toString());
+    private Mono<SuspensionOutcome> lockFallback(String role, String user, String reason, Throwable t) {
+        log.warn("[admin-bff] domain-lock WRITE degraded role={} user={} — {}", role, user, t.toString());
         return Mono.just(SuspensionOutcome.degraded(t.getClass().getSimpleName()));
     }
 
     @SuppressWarnings("unused")
-    private Mono<SuspensionOutcome> unlockFallback(String platform, String user, Throwable t) {
-        log.warn("[admin-bff] domain-lock CLEAR degraded platform={} user={} — {}", platform, user, t.toString());
+    private Mono<SuspensionOutcome> unlockFallback(String role, String user, Throwable t) {
+        log.warn("[admin-bff] domain-lock CLEAR degraded role={} user={} — {}", role, user, t.toString());
         return Mono.just(SuspensionOutcome.degraded(t.getClass().getSimpleName()));
     }
 }

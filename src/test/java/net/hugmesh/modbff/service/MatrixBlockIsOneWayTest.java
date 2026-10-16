@@ -121,7 +121,7 @@ class MatrixBlockIsOneWayTest {
                 .assertNext(result -> org.assertj.core.api.Assertions.assertThat(result.outcome())
                         .isEqualTo(BlockOutcome.DOMAIN_LOCKED))
                 .verifyComplete();
-        verify(domainLocks).lock("matrix", "@spam:evil.example", "abuse");
+        verify(domainLocks).lock("ROLE_MATRIX_DOMAINLOCKED", "@spam:evil.example", "abuse");
         verifyNoInteractions(matrix);
     }
 
@@ -158,8 +158,8 @@ class MatrixBlockIsOneWayTest {
                 .expectNextCount(1).verifyComplete();
         StepVerifier.create(service.domainUnlock("ROLE_MATRIX_DOMAINLOCKED", "alice", null, mod))
                 .expectNextCount(1).verifyComplete();
-        verify(domainLocks).lock("matrix", "alice", "evasion");
-        verify(domainLocks).unlock("matrix", "alice");
+        verify(domainLocks).lock("ROLE_MATRIX_DOMAINLOCKED", "alice", "evasion");
+        verify(domainLocks).unlock("ROLE_MATRIX_DOMAINLOCKED", "alice");
     }
 
     /** Lifting a BAN still clears access_suspension desired-state only — unrelated to a

@@ -88,4 +88,14 @@ public final class ModActionType {
     public static final String OWNCAST_KILL            = "owncast.kill";
     /** A mod RESTORES a killed owner (active ban CASed to revoked; no auto-republish). */
     public static final String OWNCAST_RESTORE         = "owncast.restore";
+
+    /*
+     * TUBE moderation. The hide EFFECT will be owned by the SEPARATE hugmesh-tube-bff-api,
+     * which exposes no moderation endpoint yet; this verb makes the event first-class in
+     * this BFF's central ledger once a {@code TubeModClient} implementation is wired. The
+     * platform value is {@code tube} (a NON-homeserver platform, sibling of
+     * {@code owncast} / {@code wiki}).
+     */
+    /** A mod HIDES a target owner's tube content (the effector call is a TubeModClient). */
+    public static final String TUBE_HIDE               = "tube.hide";
 }

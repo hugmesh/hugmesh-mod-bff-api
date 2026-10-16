@@ -114,8 +114,10 @@ of:
   instead of reimplementing it.
 - [`hugmesh-generator`](https://github.com/hugmesh/hugmesh-generator) — cluster manifests,
   deployment tooling, and the shared pen-test CI stage this repo's pipeline extends.
-- `hugmesh-mod-ui` — the moderator console for this BFF: an Angular native-federation
-  remote that `hugmesh-host-shell` mounts at `/mod`.
+- [`hugmesh-mod-ui`](https://github.com/hugmesh/hugmesh-mod-ui) — the moderator console
+  for this BFF: an Angular native-federation remote that `hugmesh-host-shell` mounts at
+  `/mod`. Its typed client is generated from this repo's committed `openapi.json` (see
+  *Paired UI*).
 
 ## What it does
 
@@ -201,7 +203,7 @@ user's traffic **local-only / no-federation**. It is an **ADDITIVE marker** (`ro
 marker only tells the homeserver/egress reconcile to force their deliveries local. That is
 the *opposite* of the REMOVE-semantics suspension, so it lives in a **separate**
 `domain_lock` table in admin-bff and never overloads `access_suspension`. A dedicated
-`AdminDomainLockClient` writes it via `POST/DELETE /bff/admin/domain-lock/{platform}/{user}`,
+`AdminDomainLockClient` writes it via `POST/DELETE /bff/admin/domain-lock/{role}/{user}`,
 with the same mTLS, bearer-forwarding and `@CircuitBreaker` as the suspension client.
 
 The delegation guards match a ban's. A MOD may **not** domain-lock themselves, nor a
@@ -270,7 +272,7 @@ sequenceDiagram
 - **admin-bff** (`hugmesh-admin-bff-api`) — the ban/lift surface writes the
   `access_suspension` desired-state via `POST/DELETE /bff/admin/access-roles/{role}/{user}`.
   The domain-lock surface writes the SEPARATE `domain_lock` desired-state via
-  `POST/DELETE /bff/admin/domain-lock/{platform}/{user}` (the `AdminDomainLockClient`,
+  `POST/DELETE /bff/admin/domain-lock/{role}/{user}` (the `AdminDomainLockClient`,
   sibling of `AdminSuspensionClient`). In-cluster default:
   `http://hugmesh-admin-bff-api.hugmesh-backend.svc.cluster.local:8080` (override
   `ADMIN_BFF_BASE_URL`). Both clients reuse the federation client's mTLS
@@ -302,8 +304,9 @@ sequenceDiagram
   `005` the `domain` column, `006` the `(dedup_key, domain)` uniqueness, `007` the `wiki.*`
   verbs and `wiki` platform, `008` the notification-directive columns, `009` a DB-generated
   UUID PK (pgcrypto plus a `gen_random_uuid()` DEFAULT, so inserts OMIT the id instead of
-  minting `UUID.randomUUID()`), and `010` the `owncast.*` verbs, the `owncast` platform and
-  the `federation.finding-resolve` API↔DB CHECK parity fix.
+  minting `UUID.randomUUID()`), `010` the `owncast.*` verbs, the `owncast` platform and
+  the `federation.finding-resolve` API↔DB CHECK parity fix, and `011` the `tube.hide` verb
+  and the `tube` platform.
 
   Every action a mod takes is recorded here with the external outcome: `stubbed` / `ok` /
   `degraded:<reason>` for blocks and owncast moderation, and `pending` propagation_state
@@ -314,7 +317,10 @@ sequenceDiagram
   `access.suspend`, `access.restore`, `domain.lock`, `domain.unlock`, the **wiki
   access-overlay** verbs `wiki.grant` / `wiki.timeout` / `wiki.ban` / `wiki.restore` (`wiki`
   platform), and the **owncast live-stream moderation** verbs `owncast.hide` /
-  `owncast.kill` / `owncast.restore` (`owncast` platform).
+  `owncast.kill` / `owncast.restore` (`owncast` platform), and the tube verb `tube.hide`
+  (`tube` platform). `tube.hide` has no HTTP endpoint yet: `ModService.tubeHide` requires
+  `ROLE_MOD` and `ROLE_TUBE` (or `ROLE_SUPERADMIN`) and refuses to run, writing no row, until a `TubeModClient`
+  implementation is registered (`hugmesh-tube-bff-api` has no moderation endpoint yet).
 
   The SEPARATE `hugmesh-wiki-bff-api` owns the *desired-state* of the wiki
   grant/timeout/ban/restore overlay (its `wiki_access` table). The wiki verbs make those
@@ -688,8 +694,10 @@ behaviour end to end through the real filter chain.
 
 ## Paired UI
 
-`hugmesh-mod-ui` is the Angular native-federation remote that consumes this BFF's OpenAPI
-spec (ng-openapi-gen typed client). It renders the moderation console, the system-findings
+[`hugmesh-mod-ui`](https://github.com/hugmesh/hugmesh-mod-ui) is the Angular
+native-federation remote that consumes this BFF's OpenAPI spec (ng-openapi-gen typed
+client; its `npm run gen:spec` copies this repo's committed
+`src/main/resources/openapi/openapi.json`). It renders the moderation console, the system-findings
 queue, the ban / domain-lock / server-wide-block controls and the audit trail. It is the
 moderator analog of admin-ui ↔ admin-bff.
 
@@ -946,6 +954,7 @@ src/main/java/net/hugmesh/modbff
   admin/                            admin-bff suspension/domain-lock clients + Casdoor role lookup (org-map, belongsToDomain)
   external/                         Matrix(tuwunel) instance-block request client (no HTTP; user deactivate removed, decision 83b) + Mastodon(akkoma) admin client (✅ wired, dark) + config
   owncast/                          owncast-bff moderation client (hide/kill/restore) + config
+  tube/TubeModClient.java           tube moderation effector seam (interface only; no implementation or bean yet)
   audit/                            mod_action R2DBC repository + record + action types + dedup key
   notify/NotifyDirective.java       service-scoped @system notification directive (ships dark)
   web/                              request DTOs + JSON exception handling
@@ -962,7 +971,8 @@ src/main/resources
   db/changelog/                     Liquibase (master + 001 mod-action, 002 constraints, 003 ban,
                                     004 domain-lock, 005 domain, 006 dedup-domain, 007 wiki, 008 notify,
                                     009 db-generated-id (pgcrypto / gen_random_uuid() UUID PK DEFAULT),
-                                    010 owncast (+ federation.finding-resolve CHECK parity))
+                                    010 owncast (+ federation.finding-resolve CHECK parity),
+                                    011 tube)
 ```
 
 ## Contributing

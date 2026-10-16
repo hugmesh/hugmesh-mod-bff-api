@@ -57,7 +57,7 @@ public class AdminApiConfig {
      * Domain-lock desired-state writer. Reuses the SAME mTLS + bearer-forwarding
      * {@code adminBffWebClient} as the suspension client — domain-lock is the
      * ADD-semantics sibling of suspension, writing a SEPARATE admin-bff
-     * {@code domain_lock} table via {@code /bff/admin/domain-lock/{platform}/{user}}.
+     * {@code domain_lock} table via {@code /bff/admin/domain-lock/{role}/{user}}.
      */
     @Bean
     AdminDomainLockClient adminDomainLockClient(WebClient adminBffWebClient) {
