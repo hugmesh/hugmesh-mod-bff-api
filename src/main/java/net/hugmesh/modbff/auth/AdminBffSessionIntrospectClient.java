@@ -3,6 +3,8 @@ package net.hugmesh.modbff.auth;
 import org.springframework.http.HttpHeaders;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Mono;
+import tools.jackson.core.StreamReadFeature;
+import tools.jackson.databind.json.JsonMapper;
 
 /**
  * The INTERNAL service-to-service client mod-bff-api uses to bridge an opaque
@@ -40,6 +42,12 @@ import reactor.core.publisher.Mono;
  */
 public class AdminBffSessionIntrospectClient {
 
+    /** Decoder for the introspect body: rejects a duplicate key instead of letting the last one
+     *  win. */
+    private static final JsonMapper INTROSPECT_READER = JsonMapper.builder()
+            .enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION)
+            .build();
+
     private final WebClient http;
 
     public AdminBffSessionIntrospectClient(WebClient http) {
@@ -57,6 +65,10 @@ public class AdminBffSessionIntrospectClient {
                 .uri("/bff/internal/session/introspect")
                 .header(HttpHeaders.AUTHORIZATION, "Bearer " + bffToken)
                 .retrieve()
-                .bodyToMono(BffSessionIntrospection.class);
+                .bodyToMono(String.class)
+                // Decoded with duplicate-key detection: by default Jackson keeps the LAST of two
+                // "status" keys, so {"status":"suspended","status":"active"} would read as
+                // active. Two values for one field fail closed as a decode error.
+                .map(body -> INTROSPECT_READER.readValue(body, BffSessionIntrospection.class));
     }
 }
