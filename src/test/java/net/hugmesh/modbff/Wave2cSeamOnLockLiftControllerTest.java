@@ -225,7 +225,7 @@ class Wave2cSeamOnLockLiftControllerTest {
         casdoor.knownUser("orgx/victim");
         noPrivilegedMembers();   // domainLock also runs guardNotPrivileged
         stubAuditRecord(ModActionType.DOMAIN_LOCK);
-        when(domainLocks.lock(eq("matrix"), eq("victim"), any()))
+        when(domainLocks.lock(eq("ROLE_MATRIX_DOMAINLOCKED"), eq("victim"), any()))
                 .thenReturn(Mono.just(SuspensionOutcome.PENDING));
         asBrandXMod().post()
                 .uri("/bff/mod/domain-lock/ROLE_MATRIX_DOMAINLOCKED/victim")
@@ -236,7 +236,7 @@ class Wave2cSeamOnLockLiftControllerTest {
                 .expectBody()
                 .jsonPath("$.state").isEqualTo("pending-reconcile")
                 .jsonPath("$.action.action").isEqualTo("domain.lock");
-        verify(domainLocks).lock(eq("matrix"), eq("victim"), any());
+        verify(domainLocks).lock(eq("ROLE_MATRIX_DOMAINLOCKED"), eq("victim"), any());
         assertThat(casdoor.lastGetUserId()).isEqualTo("orgx/victim");
     }
 
@@ -269,7 +269,7 @@ class Wave2cSeamOnLockLiftControllerTest {
         casdoor.knownUser("orgx/victim");
         noPrivilegedMembers();   // domainUnlock also runs guardNotPrivileged
         stubAuditRecord(ModActionType.DOMAIN_UNLOCK);
-        when(domainLocks.unlock(eq("mastodon"), eq("victim")))
+        when(domainLocks.unlock(eq("ROLE_MASTODON_DOMAINLOCKED"), eq("victim")))
                 .thenReturn(Mono.just(SuspensionOutcome.PENDING));
         asBrandXMod().method(HttpMethod.DELETE)
                 .uri("/bff/mod/domain-lock/ROLE_MASTODON_DOMAINLOCKED/victim")
@@ -280,7 +280,7 @@ class Wave2cSeamOnLockLiftControllerTest {
                 .expectBody()
                 .jsonPath("$.state").isEqualTo("pending-reconcile")
                 .jsonPath("$.action.action").isEqualTo("domain.unlock");
-        verify(domainLocks).unlock(eq("mastodon"), eq("victim"));
+        verify(domainLocks).unlock(eq("ROLE_MASTODON_DOMAINLOCKED"), eq("victim"));
         assertThat(casdoor.lastGetUserId()).isEqualTo("orgx/victim");
     }
 

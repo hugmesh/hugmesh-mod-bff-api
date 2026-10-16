@@ -2,6 +2,7 @@ package net.hugmesh.modbff.service;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.GrantedAuthority;
@@ -26,6 +27,7 @@ import net.hugmesh.modbff.model.PlatformKind;
 import net.hugmesh.modbff.model.ScopeKind;
 import net.hugmesh.modbff.notify.NotifyDirective;
 import net.hugmesh.modbff.owncast.OwncastModClient;
+import net.hugmesh.modbff.tube.TubeModClient;
 import net.hugmesh.commons.security.DomainRegistry;
 import net.hugmesh.modbff.security.Roles;
 import net.hugmesh.commons.web.ApiException;
@@ -75,6 +77,10 @@ public class ModService {
     private final MatrixAdminClient matrix;
     private final MastodonAdminClient mastodon;
     private final OwncastModClient owncast;
+    /** tube moderation effector; {@code null} until an implementation is registered
+     *  (tube-bff-api has no moderation endpoint yet), in which case {@code tubeHide}
+     *  refuses to run. */
+    private final TubeModClient tube;
     /** federation-api client for the Matrix instance-block approval trail (decisions
      *  84a-d); {@code null} only through the legacy 7-arg constructor. */
     private final FederationApiClient federation;
@@ -100,7 +106,17 @@ public class ModService {
     public ModService(AdminSuspensionClient suspensions, AdminDomainLockClient domainLocks,
                       CasdoorRoleClient roles, ModActionRepository audit,
                       MatrixAdminClient matrix, MastodonAdminClient mastodon,
-                      OwncastModClient owncast, FederationApiClient federation) {
+                      OwncastModClient owncast, FederationApiClient federation,
+                      ObjectProvider<TubeModClient> tube) {
+        this(suspensions, domainLocks, roles, audit, matrix, mastodon, owncast, federation,
+                tube.getIfAvailable());
+    }
+
+    public ModService(AdminSuspensionClient suspensions, AdminDomainLockClient domainLocks,
+                      CasdoorRoleClient roles, ModActionRepository audit,
+                      MatrixAdminClient matrix, MastodonAdminClient mastodon,
+                      OwncastModClient owncast, FederationApiClient federation,
+                      TubeModClient tube) {
         this.suspensions = suspensions;
         this.domainLocks = domainLocks;
         this.roles = roles;
@@ -109,6 +125,16 @@ public class ModService {
         this.mastodon = mastodon;
         this.owncast = owncast;
         this.federation = federation;
+        this.tube = tube;
+    }
+
+    /** The 8-arg form, kept so existing hand-wired tests compile unchanged: no tube client. */
+    public ModService(AdminSuspensionClient suspensions, AdminDomainLockClient domainLocks,
+                      CasdoorRoleClient roles, ModActionRepository audit,
+                      MatrixAdminClient matrix, MastodonAdminClient mastodon,
+                      OwncastModClient owncast, FederationApiClient federation) {
+        this(suspensions, domainLocks, roles, audit, matrix, mastodon, owncast, federation,
+                (TubeModClient) null);
     }
 
     /**
@@ -121,7 +147,8 @@ public class ModService {
                       CasdoorRoleClient roles, ModActionRepository audit,
                       MatrixAdminClient matrix, MastodonAdminClient mastodon,
                       OwncastModClient owncast) {
-        this(suspensions, domainLocks, roles, audit, matrix, mastodon, owncast, null);
+        this(suspensions, domainLocks, roles, audit, matrix, mastodon, owncast, null,
+                (TubeModClient) null);
     }
 
     // ── BAN (write access_suspension desired-state) ────────────────────
@@ -240,7 +267,7 @@ public class ModService {
      * Build the dedup key, record the domain-lock row, and then either skip (dedup hit)
      * or call lock() to forward the desired-state to admin-bff.
      */
-    private Mono<LockResult> recordAndApplyLock(String role, String platform, String target,
+    private Mono<LockResult> recordAndApplyLock(String role, String target,
                                                 String reason, String actor, String domain, String idempotencyKey) {
         // Build a dedup key scoped to this actor, target, domain, and idempotency token.
         String dedupKey = ModActionKey.ban(ModActionType.DOMAIN_LOCK, role, target, actor, domain, idempotencyKey);
@@ -248,7 +275,7 @@ public class ModService {
         return audit.recordBan(dedupKey, actor, ModActionType.DOMAIN_LOCK, "domain-lock",
                         target, reason, "user", null, "pending", domain)
                 // Delegate the fresh-vs-dedup decision and the actual lock write to a named helper.
-                .flatMap(recorded -> applyLockOrDedup(recorded, role, platform, target, reason));
+                .flatMap(recorded -> applyLockOrDedup(recorded, role, target, reason));
     }
 
     /**
@@ -257,7 +284,7 @@ public class ModService {
      * recordAndApplyLock flatMap body within the 10-line Checkstyle limit.
      */
     private Mono<LockResult> applyLockOrDedup(ModActionRepository.RecordedBan recorded,
-                                              String role, String platform, String target, String reason) {
+                                              String role, String target, String reason) {
         // Dedup hit: the lock() was already issued; return the persisted pending row.
         if (!recorded.fresh()) {
             log.info("[domain-lock] dedup hit — role={} target={} already recorded (id={})",
@@ -265,7 +292,7 @@ public class ModService {
             return Mono.just(LockResult.pending(recorded.action(), true));
         }
         // Fresh row: forward the lock desired-state to admin-bff and map the outcome.
-        return domainLocks.lock(platform, target, reason)
+        return domainLocks.lock(role, target, reason)
                 .map(outcome -> LockResult.of(recorded.action(), outcome, false));
     }
 
@@ -273,7 +300,7 @@ public class ModService {
      * Build the dedup key, record the domain-unlock row, and then either skip (dedup hit)
      * or call unlock() to forward the desired-state to admin-bff.
      */
-    private Mono<LockResult> recordAndApplyUnlock(String role, String platform, String target,
+    private Mono<LockResult> recordAndApplyUnlock(String role, String target,
                                                   String actor, String domain, String idempotencyKey) {
         // Build a dedup key scoped to this actor, target, domain, and idempotency token.
         String dedupKey = ModActionKey.ban(ModActionType.DOMAIN_UNLOCK, role, target, actor, domain, idempotencyKey);
@@ -286,7 +313,7 @@ public class ModService {
                         return Mono.just(LockResult.pending(recorded.action(), true));
                     }
                     // Fresh row: forward the unlock desired-state to admin-bff and map the outcome.
-                    return domainLocks.unlock(platform, target)
+                    return domainLocks.unlock(role, target)
                             .map(outcome -> LockResult.of(recorded.action(), outcome, false));
                 });
     }
@@ -495,8 +522,8 @@ public class ModService {
      * recommendation): a MOD-initiated Matrix USER block must be REVERSIBLE end to end.
      * tuwunel's only user-block verb is the one-way {@code !admin users deactivate} (no
      * {@code activate} exists), so this never drives a deactivate. Instead it writes the
-     * SAME {@code domain_lock} desired-state {@link #domainLock} does (force local-only / no-federation on the
-     * {@code matrix} platform) — which {@code DELETE
+     * SAME {@code domain_lock} desired-state {@link #domainLock} does (force local-only /
+     * no-federation, keyed by {@code ROLE_MATRIX_DOMAINLOCKED}) — which {@code DELETE
      * /bff/mod/domain-lock/ROLE_MATRIX_DOMAINLOCKED/{user}} ({@link #domainUnlock}, via
      * {@link AdminDomainLockClient#unlock}) already reverses. <b>This REVERSES decision
      * 5</b> ("ANSWERED 2026-09-10: deactivate", hugmesh-mod-bff-api#1) for the MOD path
@@ -514,7 +541,7 @@ public class ModService {
      * breaker fallback, never {@link BlockOutcome#isOk()}).
      */
     private Mono<BlockOutcome> matrixUserBlock(String target, String reason) {
-        return domainLocks.lock("matrix", target, reason)
+        return domainLocks.lock(AdminDomainLockClient.ROLE_MATRIX_DOMAINLOCKED, target, reason)
                 .map(outcome -> outcome.isDegraded()
                         ? BlockOutcome.degraded(outcome.state().substring("degraded:".length()))
                         : BlockOutcome.DOMAIN_LOCKED);
@@ -558,12 +585,12 @@ public class ModService {
         String actor = actor(auth);
         String domain = domain(auth);
         boolean superadmin = Roles.isSuperadmin(auth);
-        String platform = platformForDomainLockRole(role);
+        String lockRole = requireDomainLockRole(role);
         return guardNotSelf(actor, target)
                 .then(Mono.defer(() -> guardSameTenant(target, domain, superadmin)))
                 .then(Mono.defer(() -> guardNotPrivileged(target, domain, superadmin)))
                 // Record the deduped audit row and apply (or skip) the domain-lock desired-state write.
-                .then(Mono.defer(() -> recordAndApplyLock(role, platform, target, reason, actor, domain, idempotencyKey)));
+                .then(Mono.defer(() -> recordAndApplyLock(lockRole, target, reason, actor, domain, idempotencyKey)));
     }
 
     /**
@@ -576,24 +603,26 @@ public class ModService {
         String actor = actor(auth);
         String domain = domain(auth);
         boolean superadmin = Roles.isSuperadmin(auth);
-        String platform = platformForDomainLockRole(role);
+        String lockRole = requireDomainLockRole(role);
         return guardNotSelf(actor, target)
                 .then(Mono.defer(() -> guardSameTenant(target, domain, superadmin)))
                 .then(Mono.defer(() -> guardNotPrivileged(target, domain, superadmin)))
                 // Record the deduped audit row and apply (or skip) the domain-unlock desired-state write.
-                .then(Mono.defer(() -> recordAndApplyUnlock(role, platform, target, actor, domain, idempotencyKey)));
+                .then(Mono.defer(() -> recordAndApplyUnlock(lockRole, target, actor, domain, idempotencyKey)));
     }
 
     /**
-     * Map the domain-lock MARKER role to the admin-bff domain-lock PLATFORM key.
-     * {@code ROLE_MATRIX_DOMAINLOCKED}→{@code matrix}, {@code ROLE_MASTODON_DOMAINLOCKED}
-     * →{@code mastodon}. Any other value is a 400 (the controller also {@code @Pattern}s
-     * the path variable to exactly these two roles — defence in depth).
+     * Validate the domain-lock MARKER role and return it unchanged: admin-bff keys its
+     * {@code domain_lock} surface by the role itself ({@code ROLE_MATRIX_DOMAINLOCKED} |
+     * {@code ROLE_MASTODON_DOMAINLOCKED}), NOT by a {@code matrix|mastodon} platform name
+     * (a platform name in that path segment is a 400 there, hugmesh-mod-bff-api#26). Any
+     * other value is a 400 here (the controller also {@code @Pattern}s the path variable to
+     * exactly these two roles — defence in depth).
      */
-    static String platformForDomainLockRole(String role) {
+    static String requireDomainLockRole(String role) {
         return switch (role == null ? "" : role) {
-            case "ROLE_MATRIX_DOMAINLOCKED"   -> "matrix";
-            case "ROLE_MASTODON_DOMAINLOCKED" -> "mastodon";
+            case AdminDomainLockClient.ROLE_MATRIX_DOMAINLOCKED,
+                 AdminDomainLockClient.ROLE_MASTODON_DOMAINLOCKED -> role;
             default -> throw ApiException.badRequest("unknown domain-lock role: " + role);
         };
     }
@@ -733,6 +762,36 @@ public class ModService {
         return external.flatMap(outcome -> audit.record(actor, action, "owncast", target,
                         reason, outcome.result(), domain)
                 .map(recorded -> new OwncastModResult(recorded, outcome)));
+    }
+
+    // ── TUBE moderation (TubeModClient effector + central ledger row) ──
+    /**
+     * HIDE the target owner's tube content and record a {@code tube.hide} row in the
+     * central ledger. The caller must be a tube moderator ({@link Roles#isTubeMod}: MOD
+     * and TUBE), checked FIRST; then the punitive-action guards run ({@code guardNotSelf}
+     * &rarr; {@code guardSameTenant} &rarr; {@code guardNotPrivileged}), all BEFORE the
+     * effector call or ledger row. With no {@link TubeModClient} registered nothing runs
+     * and nothing is ledgered. The ledger row records the HONEST effector outcome
+     * ({@code ok} / {@code degraded:<reason>}); an effector error (e.g. no such content)
+     * writes no row.
+     */
+    public Mono<TubeModResult> tubeHide(String target, String reason, Authentication auth) {
+        if (!Roles.isTubeMod(auth)) {
+            return Mono.error(ApiException.forbidden("tube moderation requires ROLE_MOD and ROLE_TUBE"));
+        }
+        if (tube == null) {
+            return Mono.error(new IllegalStateException("tube moderation is not configured"));
+        }
+        String actor = actor(auth);
+        String domain = domain(auth);
+        boolean superadmin = Roles.isSuperadmin(auth);
+        return guardNotSelf(actor, target)
+                .then(Mono.defer(() -> guardSameTenant(target, domain, superadmin)))
+                .then(Mono.defer(() -> guardNotPrivileged(target, domain, superadmin)))
+                .then(Mono.defer(() -> tube.hide(target, reason)))
+                .flatMap(outcome -> audit.record(actor, ModActionType.TUBE_HIDE, "tube", target,
+                                reason, outcome.result(), domain)
+                        .map(recorded -> new TubeModResult(recorded, outcome)));
     }
 
     private static String blockActionFor(String platform, boolean user) {
@@ -992,6 +1051,15 @@ public class ModService {
                         + "NO reconcile loop on this surface: retry once owncast-bff is healthy");
             }
             return out;
+        }
+    }
+
+    /** The outcome of a tube hide + the persisted central-ledger row. Like the owncast
+     *  effect it is SYNCHRONOUS: only an {@link BlockOutcome#isOk() ok} outcome is applied. */
+    public record TubeModResult(ModAction action, BlockOutcome outcome) {
+
+        public boolean applied() {
+            return outcome.isOk();
         }
     }
 }

@@ -61,4 +61,5 @@
     <include file="db/changelog/008-mod-action-notify.xml"/>
     <include file="db/changelog/009-mod-action-db-generated-id.xml"/>
     <include file="db/changelog/010-mod-action-owncast.xml"/>
+    <include file="db/changelog/011-mod-action-tube.xml"/>
 </databaseChangeLog>
