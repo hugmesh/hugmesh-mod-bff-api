@@ -399,7 +399,10 @@ class BffCookieAuthenticationWebFilterTest {
         return java.util.stream.Stream.of(
                 null, "", "   ", "pending", "disabled", "locked", "deleted", "inactive",
                 " active", "active ", "active\n", "activ", "actives", "ac\u0074ive\u200b",
-                "active\r\nX-Evil: 1");
+                "active\r\nX-Evil: 1",
+                // Non-ASCII lookalikes String.equalsIgnoreCase folds onto ASCII: U+0130
+                // (dotted capital I) to 'i', U+017F (long s) to 's'.
+                "act\u0130ve", "ACT\u0130VE", "\u017Fuspended");
     }
 
     @org.junit.jupiter.params.ParameterizedTest

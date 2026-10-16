@@ -233,16 +233,38 @@ public class BffCookieAuthenticationWebFilter implements WebFilter {
         // ALLOW-LIST: authorities are granted ONLY for an explicit "active". suspended/banned
         // keep their specific reason; a missing, blank, padded or unrecognized status is refused
         // with a constant reason (the raw, backend-supplied status is never echoed to a header).
-        if ("active".equalsIgnoreCase(status)) {
+        // Comparison is ASCII-only: String.equalsIgnoreCase folds U+0130 (dotted capital I) to
+        // 'i' and U+017F (long s) to 's', so it would accept a non-ASCII lookalike of "active"
+        // and echo a lookalike of "suspended" into the denial header.
+        if (asciiEqualsIgnoreCase(status, "active")) {
             return Decision.authenticate(authenticationFor(intro));
         }
-        if ("suspended".equalsIgnoreCase(status) || "banned".equalsIgnoreCase(status)) {
-            log.warn("[bff-cookie-auth] denied — account status={} id={}", status, intro.id());
-            return Decision.forbidden(status.toLowerCase(Locale.ROOT));
+        if (asciiEqualsIgnoreCase(status, "suspended") || asciiEqualsIgnoreCase(status, "banned")) {
+            String reason = asciiEqualsIgnoreCase(status, "banned") ? "banned" : "suspended";
+            log.warn("[bff-cookie-auth] denied — account status={} id={}", reason, intro.id());
+            return Decision.forbidden(reason);
         }
         log.warn("[bff-cookie-auth] denied — unrecognized account status (blank={}) id={}",
                 status == null || status.isBlank(), intro.id());
         return Decision.forbidden(UNRECOGNIZED_STATUS_REASON);
+    }
+
+    /** True when {@code value} equals {@code expected} (lower-case ASCII) ignoring ASCII case
+     *  only. */
+    static boolean asciiEqualsIgnoreCase(String value, String expected) {
+        if (value == null || value.length() != expected.length()) {
+            return false;
+        }
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (c >= 'A' && c <= 'Z') {
+                c = (char) (c + ('a' - 'A'));
+            }
+            if (c != expected.charAt(i)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static Decision failClosed(Throwable ex) {
