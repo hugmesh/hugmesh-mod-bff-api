@@ -393,6 +393,56 @@ class BffCookieAuthenticationWebFilterTest {
         assertThat(d.reason()).isEqualTo("banned");
     }
 
+    // ── allow-list: only an explicit "active" is granted; everything else fails CLOSED ──
+
+    private static java.util.stream.Stream<String> notActiveStatuses() {
+        return java.util.stream.Stream.of(
+                null, "", "   ", "pending", "disabled", "locked", "deleted", "inactive",
+                " active", "active ", "active\n", "activ", "actives", "ac\u0074ive\u200b",
+                "active\r\nX-Evil: 1");
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.MethodSource("notActiveStatuses")
+    void unknownOrMissingStatus_forbidden_chainNeverCalled(String status) {
+        AdminBffSessionIntrospectClient client = mock(AdminBffSessionIntrospectClient.class);
+        when(client.introspect("bff_unknown")).thenReturn(Mono.just(
+                intro("casdoor:u", true, List.of("mod", "superadmin"), status, true)));
+
+        BffCookieAuthenticationWebFilter f = new BffCookieAuthenticationWebFilter(providerOf(client), TIMEOUT_MS);
+        MockServerWebExchange exchange = MockServerWebExchange.from(MockServerHttpRequest.get("/bff/mod/audit")
+                .header(HttpHeaders.AUTHORIZATION, "Bearer bff_unknown").build());
+        CapturingChain chain = new CapturingChain();
+
+        StepVerifier.create(f.filter(exchange, chain)).verifyComplete();
+
+        assertThat(chain.forwarded.get()).as("status=%s", status).isEqualTo(0);
+        assertThat(exchange.getResponse().getStatusCode()).as("status=%s", status).isEqualTo(HttpStatus.FORBIDDEN);
+        assertThat(exchange.getResponse().getHeaders().getFirst("X-Bff-Denied"))
+                .as("status=%s", status).isEqualTo("account-status-unrecognized");
+        assertThat(exchange.getResponse().getHeaders().getFirst("X-Evil")).isNull();
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {
+            "{\"id\":\"casdoor:u\",\"roles\":[\"mod\"],\"registrationComplete\":true,\"mfaSatisfied\":true}",
+            "{\"id\":\"casdoor:u\",\"roles\":[\"mod\"],\"registrationComplete\":true,\"status\":null}",
+            "{\"id\":\"casdoor:u\",\"roles\":[\"mod\"],\"registrationComplete\":true,\"status\":\"pending\"}"})
+    void wireBodyWithoutAnActiveStatus_decidesForbidden(String wireBody) throws Exception {
+        BffSessionIntrospection parsed = new com.fasterxml.jackson.databind.ObjectMapper()
+                .readValue(wireBody, BffSessionIntrospection.class);
+        assertThat(BffCookieAuthenticationWebFilter.decide(parsed).kind())
+                .isEqualTo(BffCookieAuthenticationWebFilter.Kind.FORBIDDEN);
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"active", "ACTIVE", "Active"})
+    void activeStatus_anyCase_isStillAuthenticated(String status) {
+        assertThat(BffCookieAuthenticationWebFilter.decide(
+                intro("casdoor:u1", true, List.of("mod"), status, false)).kind())
+                .isEqualTo(BffCookieAuthenticationWebFilter.Kind.AUTHENTICATE);
+    }
+
     // ── authority mapping unit tests ─────────────────────────────────────────────
 
     @Test

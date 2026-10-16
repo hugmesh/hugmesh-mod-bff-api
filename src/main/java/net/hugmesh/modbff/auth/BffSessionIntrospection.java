@@ -25,8 +25,9 @@ public record BffSessionIntrospection(
         String status,
         boolean mfaSatisfied) {
 
-    /** Compact constructor: safe defaults for optional fields, mirroring the gateway's
-     *  {@code MeResponse} compact constructor — a partial body never NPEs the mapping.
+    /** Compact constructor: safe defaults for optional fields — a partial body never NPEs the
+     *  mapping. A missing {@code status} becomes blank (unknown), which {@code
+     *  BffCookieAuthenticationWebFilter} refuses (403); it is never defaulted to "active".
      *
      *  <p>{@code roles} is additionally defensively copied into an immutable list, so this
      *  record neither aliases a list the caller can still mutate nor hands one back from
@@ -54,6 +55,8 @@ public record BffSessionIntrospection(
         if (id == null) id = "";
         if (provider == null) provider = "";
         roles = roles == null ? List.of() : List.copyOf(roles.stream().filter(Objects::nonNull).toList());
-        if (status == null) status = "active";
+        // NOT defaulted to "active": a body that omits status must not read as a live account.
+        // Blank is the "unknown" value the filter's allow-list refuses.
+        if (status == null) status = "";
     }
 }
