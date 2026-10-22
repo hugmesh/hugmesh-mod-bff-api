@@ -14,8 +14,9 @@ The service is reactive throughout. It uses Spring WebFlux and the reactive `Web
 runtime table. JDBC is used **only** for Liquibase migrations. It is a Casdoor JWT OAuth2
 resource server with springdoc-openapi (webflux-ui), is Spring Native-ready, and runs on
 Java 25 LTS with **Spring Boot 4.0.7 / Spring Cloud 2025.1.2**. It builds on the org's
-shared Maven baseline: `hugmesh-parent` metapom 2.8.0, plus `hugmesh-commons` 2.1.0 for
-the shared security/tenancy code. Its conventions are copied verbatim from
+shared Maven baseline: `hugmesh-parent` metapom 2.9.0-beta.1, plus `hugmesh-commons`
+2.2.0-beta.1 for the shared security/tenancy code. The service itself is `mod-bff`
+`0.2.0-beta.1` (see *Versions and publishing*). Its conventions are copied verbatim from
 `hugmesh-admin-bff-api`.
 
 > **Auth-core note.** The platform's `hugmesh-auth-core` artifact (shared account,
@@ -636,7 +637,7 @@ sequenceDiagram
 > reads, the `SUPERADMIN` floor, `app.tenancy.issuers` (`application.yml`), and the
 > `domain` column with its composite dedup index (changelogs `005`/`006`). The converter,
 > `DomainRegistry` and multi-issuer resource server are the **shared `hugmesh-commons`
-> 2.1.0** implementations (`net.hugmesh.commons.security.*` / `commons.config.*`), wired in
+> 2.2.0-beta.1** implementations (`net.hugmesh.commons.security.*` / `commons.config.*`), wired in
 > through the local `CommonsSecurityConfig` `@Import`. A single-issuer cluster works
 > unchanged: every token resolves to `DOMAIN_default`.
 
@@ -802,8 +803,8 @@ generator-owned deployment requirement.
 ## Current State
 
 - **✅ On the unified org baseline.** Spring Boot 4.0.7 / Spring Cloud 2025.1.2, Java 25
-  LTS, built against `hugmesh-parent` (metapom) 2.8.0 and consuming `hugmesh-commons`
-  2.1.0 for the shared security/tenancy code. The per-repo copies of the Casdoor converter,
+  LTS, built against `hugmesh-parent` (metapom) 2.9.0-beta.1 and consuming `hugmesh-commons`
+  2.2.0-beta.1 for the shared security/tenancy code. The per-repo copies of the Casdoor converter,
   `DomainRegistry` and the multi-issuer resource server have been **deleted** and replaced
   by the shared commons types (`net.hugmesh.commons.security.*` / `commons.config.*`),
   wired through the local `CommonsSecurityConfig` `@Import`. Local code that remains:
@@ -834,8 +835,8 @@ generator-owned deployment requirement.
 - **✅ CI: GitLab-primary.** `.gitlab-ci.yml` has `test` / `security` / `build` / `pentest`
   stages. The pen-test SCA + DAST jobs `extend` the centralized hidden jobs included from
   `hugmesh-generator`. This GitHub repository is a pull-mirror of that internal GitLab
-  project. It also carries a manually-triggered `.github/workflows/release.yml` for
-  publishing images to GHCR (see *Build & test*). A Forgejo deploy descriptor (`deploy/`)
+  project. It also carries `.github/workflows/release.yml` for publishing images to
+  GHCR (see *Versions and publishing*). A Forgejo deploy descriptor (`deploy/`)
   ships dark for an in-progress GitOps source-flip.
 
 ## Roadmap
@@ -915,14 +916,6 @@ The project's primary CI/CD runs on its internal, self-hosted GitLab. This GitHu
 repository is a pull-mirror of it, and `.gitlab-ci.yml` (below) is the source of truth for
 testing, security scanning, and building and pushing the container image.
 
-A manually-triggered `.github/workflows/release.yml` also publishes images to GHCR
-(`ghcr.io/hugmesh/hugmesh-mod-bff-api`). It runs on a GitHub-hosted runner and resolves the
-private `net.hugmesh` libraries (`hugmesh-build-config`, `hugmesh-parent`,
-`hugmesh-commons`) from GitHub Packages. It needs the repository secret
-`PACKAGES_READ_TOKEN` (a classic PAT with `read:packages`). Without it, the preflight step
-fails by name. The container image (multi-stage Temurin 25 JDK→JRE) carries no baked-in
-secrets. Key material is provisioned separately at first boot.
-
 `.gitlab-ci.yml` declares four stages, in order: **`test`**, **`security`**, **`build`**
 and **`pentest`**. The `security` stage has no job in this file.
 
@@ -936,6 +929,43 @@ and **`pentest`**. The `security` stage has no job in this file.
   of truth shared by every onboarded repo. Both jobs are `allow_failure: true` (advisory)
   and run on the default branch and merge-request events. This is the
   **dev/CI-pipeline** pen-test stage, NOT a deployed CronJob or a UI-triggered scan.
+
+### Versions and publishing
+
+The package is in beta: `pom.xml` is `0.2.0-beta.1` (base `0.2.0` means built and tested,
+not yet proven on a live mesh). Each new published beta of the same base raises the
+`-beta.N` number; a published version is never reused or overwritten. It builds against
+`hugmesh-parent 2.9.0-beta.1` and the `hugmesh-commons 2.2.0-beta.1` tests jar, which the
+library release chain (build-config, then parent, then commons) must publish first.
+
+`.github/workflows/release.yml` publishes `ghcr.io/hugmesh/hugmesh-mod-bff-api`. Its first
+job tests and then runs `scripts/release-version.sh`, which reads the version from
+`pom.xml` and decides what may be pushed:
+
+| Trigger | Image tags | GitHub Release |
+|---|---|---|
+| push to `main`, or a manual run on `main` | `main`, `sha-<12>` | none |
+| push of tag `v<version>`, or a manual run on that tag | `<version>`, `beta` (for a `-beta.N`), `sha-<12>` | prerelease, not latest |
+| anything else | refused | none |
+
+The tag must equal `v` + the `pom.xml` version, a `-SNAPSHOT` is refused, and a version
+that already exists in GHCR is never overwritten. `latest` moves only for a final
+(non-prerelease) version, and none exists yet. There is no pull-request trigger. Each job
+runs on the runner list in the repository variable `RUNS_ON_PUBLISH` (for example the
+local self-hosted runner) only for `main` and `v*` tags; otherwise, or when that variable
+is unset, it runs on GitHub-hosted `ubuntu-latest`.
+
+Before building, the image job checks that the repository secret `PACKAGES_READ_TOKEN` (a
+classic PAT with `read:packages`) can read `hugmesh-build-config`, `hugmesh-parent` and
+`hugmesh-commons` on GitHub Packages; without it, that step fails by name. GitHub Packages
+needs a token even for a public package, so the secret stays after the repository goes
+public. The container image (multi-stage Temurin 25 JDK→JRE) carries no baked-in secrets.
+Key material is provisioned separately at first boot.
+
+To publish a beta: merge the version change, push an annotated tag `v<version>` on that
+`main` commit (the tag push runs the release), or re-run it with
+`gh workflow run release.yml -R hugmesh/hugmesh-mod-bff-api --ref v<version>`. Test the
+guard with `bash scripts/test-release-version.sh`.
 
 ## Layout
 
@@ -965,7 +995,7 @@ src/main/java/net/hugmesh/modbff
   web/                              request DTOs + JSON exception handling
 ```
 
-The shared `hugmesh-commons` 2.1.0 artifact (`net.hugmesh.commons.security.*` /
+The shared `hugmesh-commons` 2.2.0-beta.1 artifact (`net.hugmesh.commons.security.*` /
 `commons.config.*`) now holds the Casdoor JWT→authority converter (CasdoorAuthorities), the
 issuer→domain DomainRegistry, and the opt-in multi-issuer TenancyResourceServerConfig.
 CommonsSecurityConfig wires them in. They are no longer per-repo files.
