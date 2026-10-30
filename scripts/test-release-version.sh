@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Tests for scripts/release-version.sh (the release.yml version guard). No network: tag cases
-# run against a throwaway git repository built in a temp dir.
+# Tests for scripts/release-version.sh (the release.yml version guard) and for the release.yml
+# "Refuse to overwrite a published version" step, run under bash -e with docker stubbed. No
+# network: tag cases run against a throwaway git repository built in a temp dir.
 # Run: bash scripts/test-release-version.sh
 set -euo pipefail
 
@@ -145,6 +146,14 @@ set -e
 r=0; [ "${RC}" -eq 0 ] && has 'version=' || r=1
 check "committed pom.xml version passes the guard" "${r}"
 
+# 8b. a plain X.Y.Z pom, as a stable bump leaves it, passes on its release/X.Y branch and on main.
+pom 0.2.1; run refs/heads/release/0.2 "${R2}"
+r=0; [ "${RC}" -eq 0 ] && has 'version=0.2.1' || r=1
+check "plain X.Y.Z pom passes the guard on release/X.Y" "${r}"
+pom 0.2.1; run refs/heads/main "${M3}"
+r=0; [ "${RC}" -eq 0 ] && has 'version=0.2.1' && lacks ':latest' && lacks "${IMG}:0.2" || r=1
+check "plain X.Y.Z pom on main publishes :main and :sha-<12> only" "${r}"
+
 # 9. GITHUB_OUTPUT receives the same six keys.
 pom 0.3.0-beta.1
 : > "${WORK}/out"
@@ -245,6 +254,79 @@ check "push to release/0.2 publishes :sha-<12> only" "${r}"
 pom 0.3.0-beta.1; run refs/heads/release/0.2 "${R2}"
 r=0; [ "${RC}" -ne 0 ] && has 'not on the 0.2 line' && lacks 'kind=' || r=1
 check "push to release/0.2 with pom 0.3.0-beta.1 is refused" "${r}"
+
+# 15. release.yml "Refuse to overwrite a published version": run the step's own run block the
+#     way GitHub runs a step with no shell: key (bash -e {0}), with docker stubbed. The normal
+#     first publish ("not found") must continue; an existing tag and an unclassified registry
+#     answer must both stop the run. A bare `out=$(...)` + `rc=$?` dies under -e on "not found".
+WORKFLOW="${SCRIPT_DIR}/../.github/workflows/release.yml"
+STEP_NAME='Refuse to overwrite a published version'
+awk -v name="${STEP_NAME}" '
+  function ind(l) { match(l, /^ */); return RLENGTH }
+  !found && $0 ~ "^ *- name: " name "$" { found = 1; next }
+  found && !inrun && /^ *run: \|$/ { inrun = 1; runind = ind($0); next }
+  inrun {
+    if ($0 ~ /^ *$/) { print ""; next }
+    if (ind($0) <= runind) exit
+    if (!strip) strip = ind($0)
+    print substr($0, strip + 1)
+  }
+' "${WORKFLOW}" > "${WORK}/overwrite-step.sh"
+OUT="$(cat "${WORK}/overwrite-step.sh")"
+r=0; has 'docker buildx imagetools inspect' && has 'already exists in GHCR' && has 'set -uo pipefail' || r=1
+check "release.yml overwrite-guard step was found and extracted" "${r}"
+if grep -Eq '^\s*(defaults|shell):' "${WORKFLOW}"; then
+  OUT="$(grep -En '^\s*(defaults|shell):' "${WORKFLOW}")"
+  check "release.yml sets no shell/defaults (this test assumes GitHub's bash -e {0})" 1
+fi
+
+mkdir -p "${WORK}/bin"
+cat > "${WORK}/bin/docker" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${STUB_LOG}"
+[ "$*" = "buildx imagetools inspect ${STUB_EXPECT_REF}" ] || { echo "stub: unexpected args: $*" >&2; exit 97; }
+case "${STUB_MODE}" in
+  absent)  echo "ERROR: ${STUB_EXPECT_REF}: not found" >&2; exit 1 ;;
+  unknown) echo "ERROR: failed to authorize: MANIFEST_UNKNOWN: manifest unknown" >&2; exit 1 ;;
+  present) echo "Name:      ${STUB_EXPECT_REF}"; echo "MediaType: application/vnd.oci.image.index.v1+json"; exit 0 ;;
+  denied)  echo "ERROR: failed to authorize: denied: denied" >&2; exit 1 ;;
+  *)       echo "stub: bad STUB_MODE" >&2; exit 98 ;;
+esac
+STUB
+chmod +x "${WORK}/bin/docker"
+
+step() {
+  # $1 = stub mode, $2 = channel (default beta); runs the extracted step as GitHub would; sets
+  # OUT and RC.
+  : > "${WORK}/docker.log"
+  set +e
+  OUT="$(PATH="${WORK}/bin:${PATH}" STUB_MODE="$1" STUB_LOG="${WORK}/docker.log" \
+    STUB_EXPECT_REF="${IMG}:0.2.0-beta.1" IMAGE="${IMG}" VERSION=0.2.0-beta.1 CHANNEL="${2:-beta}" \
+    bash --noprofile --norc -e "${WORK}/overwrite-step.sh" 2>&1)"
+  RC=$?
+  set -e
+  CALLS="$(wc -l < "${WORK}/docker.log")"
+}
+
+step absent
+r=0; [ "${RC}" -eq 0 ] && [ "${CALLS}" -eq 1 ] && has 'is not published yet; continuing' && lacks '::error::' || r=1
+check "overwrite guard under bash -e: absent image (first publish) continues" "${r}"
+
+step unknown
+r=0; [ "${RC}" -eq 0 ] && [ "${CALLS}" -eq 1 ] && has 'is not published yet; continuing' || r=1
+check "overwrite guard under bash -e: MANIFEST_UNKNOWN continues" "${r}"
+
+step present
+r=0; [ "${RC}" -ne 0 ] && [ "${CALLS}" -eq 1 ] && has 'already exists in GHCR' && lacks 'continuing' || r=1
+check "overwrite guard under bash -e: published image is refused" "${r}"
+
+step present stable
+r=0; [ "${RC}" -ne 0 ] && has 'already exists in GHCR' && has 'fix forward' && lacks 'continuing' || r=1
+check "overwrite guard under bash -e: published stable is refused with the stable message" "${r}"
+
+step denied
+r=0; [ "${RC}" -ne 0 ] && [ "${CALLS}" -eq 1 ] && has 'could not tell whether' && has 'denied' && lacks 'continuing' || r=1
+check "overwrite guard under bash -e: unclassified registry error fails closed" "${r}"
 
 if [ "${FAILURES}" -ne 0 ]; then
   printf '\ntest-release-version: %d failure(s)\n' "${FAILURES}" >&2

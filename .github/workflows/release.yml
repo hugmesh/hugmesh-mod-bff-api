@@ -174,8 +174,11 @@ jobs:
           # Only the exact version is immutable. The floating :beta, :X.Y and :latest are
           # meant to move, so they are never checked here.
           ref="${IMAGE}:${VERSION}"
-          out=$(docker buildx imagetools inspect "${ref}" 2>&1)
-          rc=$?
+          # The step runs as `bash -e {0}` (no shell: key), and `set -uo pipefail` does not turn
+          # -e off: a bare `out=$(...)` would end the step on the normal "not found" answer of a
+          # first publish, before the rc check below. `|| rc=$?` keeps the failure in rc.
+          rc=0
+          out=$(docker buildx imagetools inspect "${ref}" 2>&1) || rc=$?
           if [ "${rc}" -eq 0 ]; then
             if [ "${CHANNEL}" = "stable" ]; then
               echo "::error::${ref} already exists in GHCR. A published version is never overwritten: fix forward with the next patch (raise X.Y.Z on release/X.Y), merge, and tag the new version."
