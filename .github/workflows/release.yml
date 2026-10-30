@@ -21,6 +21,9 @@ name: Release
 #   Every tag must equal "v" + the pom version, and <version> must not exist in GHCR yet: a
 #   published :X.Y.Z / :X.Y.Z-beta.N is never overwritten, while :beta, :X.Y and :latest
 #   move. Every pushed tag names the one digest that is signed and attested below.
+#   "Re-run failed jobs" reuses the version job's answer, so the image job asks again right
+#   before the build and refuses if the answer changed (see "Re-check the floating tags"), and
+#   the GitHub Release is only marked Latest if it still holds when the Release is created.
 #   workflow_dispatch on a v* tag    the same as the tag push (the re-run path); the GitHub
 #                                    Release step is skipped if the release already exists.
 #   workflow_dispatch on a branch    the same as a push to that branch.
@@ -107,8 +110,11 @@ jobs:
       id-token: write
       attestations: write
     steps:
+      # fetch-depth: 0 for "Re-check the floating tags", which runs the version guard again.
       - name: Check out
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       # PREFLIGHT, cross-repo package read. Fails here, by name, instead of deep inside Maven.
       # The net.hugmesh libraries live in the GitHub Packages registries of the chain
@@ -197,6 +203,42 @@ jobs:
               exit 1
               ;;
           esac
+
+      # :X.Y and :latest depend on which stable tags exist, and the version job's answer can be
+      # old: "Re-run failed jobs" reuses it however much later that happens. Without this check,
+      # re-running v0.3.0 after v0.4.0 published would move :latest back to 0.3.0. Ask the same
+      # guard again from the tags on origin now, the last thing before the build. Any difference
+      # stops the run with nothing pushed, and a "Re-run all jobs" decides afresh. The build
+      # itself still takes minutes, and a registry has no compare-and-swap, so a tag pushed in
+      # that window is not seen here.
+      - name: Re-check the floating tags against origin
+        if: needs.version.outputs.kind == 'release'
+        env:
+          WANT_TAGS: ${{ needs.version.outputs.tags }}
+          WANT_LATEST: ${{ needs.version.outputs.latest }}
+        run: |
+          set -euo pipefail
+          git fetch --quiet --force --prune origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*'
+          rc=0
+          fresh="$(GITHUB_OUTPUT='' bash scripts/release-version.sh 2>&1)" || rc=$?
+          if [ "${rc}" -ne 0 ]; then
+            printf '%s\n' "${fresh}"
+            echo "::error::the version guard accepted this release earlier and refuses it now (output above). Nothing was pushed."
+            exit 1
+          fi
+          got_tags=""
+          got_latest=""
+          while IFS= read -r line; do
+            case "${line}" in
+              tags=*) got_tags="${line#tags=}" ;;
+              latest=*) got_latest="${line#latest=}" ;;
+            esac
+          done <<< "${fresh}"
+          if [ "${got_tags}" != "${WANT_TAGS}" ] || [ "${got_latest}" != "${WANT_LATEST}" ]; then
+            echo "::error::the version job chose tags ${WANT_TAGS} (latest=${WANT_LATEST}), but the tags on origin now give ${got_tags} (latest=${got_latest}). Nothing was pushed. Use 'Re-run all jobs', not 'Re-run failed jobs', so the version job decides again."
+            exit 1
+          fi
+          echo "  floating tags still correct: ${got_tags} (latest=${got_latest})"
 
       - name: Build and push image
         id: build
@@ -310,6 +352,32 @@ jobs:
           sbom-path: ${{ runner.temp }}/sbom.spdx.json
           push-to-registry: true
 
+      # The signature is on the digest, so a tag only carries it if it names that digest. The
+      # format must be {{json .Manifest.Digest}} (quotes stripped below): buildx treats any format
+      # that starts with {{.Manifest as "print the whole manifest listing", so the bare
+      # {{.Manifest.Digest}} never prints a digest. Checked against a real tag on buildx v0.31.0.
+      - name: Check every pushed tag resolves to the signed digest
+        if: steps.signref.outcome == 'success'
+        env:
+          TAGS: ${{ needs.version.outputs.tags }}
+          DIGEST: ${{ steps.signref.outputs.digest }}
+        run: |
+          set -euo pipefail
+          IFS=',' read -r -a refs <<< "${TAGS}"
+          if [ "${#refs[@]}" -eq 0 ]; then
+            echo "::error::no pushed tags to check"
+            exit 1
+          fi
+          for ref in "${refs[@]}"; do
+            got="$(docker buildx imagetools inspect "${ref}" --format '{{json .Manifest.Digest}}')"
+            got="${got//\"/}"
+            if [ "${got}" != "${DIGEST}" ]; then
+              echo "::error::${ref} resolves to ${got}, not the signed digest ${DIGEST}"
+              exit 1
+            fi
+            echo "  ${ref} -> ${DIGEST} (signed)"
+          done
+
       - name: Write the verify commands to the job summary
         if: steps.signref.outcome == 'success'
         env:
@@ -335,6 +403,14 @@ jobs:
     permissions:
       contents: write
     steps:
+      # The guard and every tag, to ask whether this release may still be marked Latest. The
+      # Release only needs GH_TOKEN, so the write token is not left in the checkout.
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
       - name: Create the GitHub Release (beta prerelease never latest; stable latest only on the newest line)
         env:
           GH_TOKEN: ${{ github.token }}
@@ -348,6 +424,23 @@ jobs:
           if gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
             echo "Release ${tag} already exists; not touching it."
             exit 0
+          fi
+          # LATEST=true means the image job moved :latest. That answer can be old (a re-run of
+          # this job alone reuses it), so a newer stable taken since then keeps the Latest mark
+          # where it is. This never fails the run: the image is already out, and a re-run would
+          # stop at the overwrite guard, so a refusal here would leave no way to make the Release.
+          if [ "${LATEST}" = "true" ]; then
+            LATEST=false
+            if fresh="$(GITHUB_OUTPUT='' bash scripts/release-version.sh 2>&1)"; then
+              case $'\n'"${fresh}"$'\n' in
+                *$'\n'latest=true$'\n'*) LATEST=true ;;
+              esac
+            else
+              printf '%s\n' "${fresh}"
+            fi
+            if [ "${LATEST}" != "true" ]; then
+              echo "::warning::${tag} is no longer the newest stable release; not marking this Release Latest."
+            fi
           fi
           flags=(--verify-tag --title "${tag}")
           # The channel comes from the tag (the version guard); the suffix check is a second
