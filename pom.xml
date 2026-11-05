@@ -27,7 +27,7 @@
   <!-- NO -api suffix in the artifactId; the -api lives only in the repo / service
        / image name (hugmesh-mod-bff-api), mirroring admin-bff. -->
   <artifactId>mod-bff</artifactId>
-  <version>0.2.0-beta.1</version>
+  <version>0.4.0-beta.2</version>
 
   <dependencies>
     <!-- The shared, canonical HugMesh security/tenancy/config/web building blocks
