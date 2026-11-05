@@ -38,6 +38,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.function.Supplier;
 
 /**
  * Moderation service layer — DEFENCE IN DEPTH. The controller's method-level
@@ -199,22 +200,65 @@ public class ModService {
 
     private Mono<BanResult> applyOrDedup(ModActionRepository.RecordedBan recorded, String role, String target,
                                          Long ttlSeconds, String reason, NotifyDirective notify) {
-        if (!recorded.fresh()) {
-            // Deduped retry: the desired-state was already written on the first call;
-            // do not re-trigger the effect. Report the persisted pending row.
-            log.info("[ban] dedup hit — role={} target={} already recorded (id={})",
-                    role, target, recorded.action().id());
-            return Mono.just(BanResult.pending(recorded.action(), true));
-        }
         // Forward the ttl/reason + the (service-scoped) notify directive to admin-bff.
         // NOTE: the actor is DELIBERATELY NOT forwarded — the neutral @system sender must
         // never learn (or surface) who moderated. When NO notification was requested we
         // use the legacy directive-less write so the wire body is byte-for-byte unchanged.
-        Mono<SuspensionOutcome> write = (notify.any() || notify.emailOnly())
+        // Deferred: sendOrDedup decides whether the write runs at all (fresh row, or a
+        // retry of a FAILED row) or is skipped (dedup hit on a delivered write).
+        Supplier<Mono<SuspensionOutcome>> write = () -> (notify.any() || notify.emailOnly())
                 ? suspensions.suspend(role, target, ttlSeconds, reason, notify.channels(), notify.emailOnly())
                 : suspensions.suspend(role, target, ttlSeconds, reason);
-        return write.map(outcome -> BanResult.of(recorded.action(), outcome, false));
+        return sendOrDedup(recorded, write, "ban", role, target)
+                .map(sent -> BanResult.of(sent.action(), sent.outcome(), sent.deduped()));
     }
+
+    /**
+     * The fresh / dedup / retry decision shared by every admin-bff desired-state write
+     * (ban, lift, domain-lock, domain-unlock), hugmesh-mod-bff-api#27:
+     * <ul>
+     *   <li><b>fresh row</b> — send the write;</li>
+     *   <li><b>dedup hit on a row whose write FAILED</b> ({@code propagation_state =
+     *       failed}) — the earlier attempt never reached admin-bff, so this retry claims
+     *       the row (compare-and-set back to {@code pending}) and RE-SENDS the write,
+     *       reporting {@code deduped=false}. A concurrent retry that loses the claim
+     *       reports the row as a dedup hit and sends nothing;</li>
+     *   <li><b>dedup hit on any other row</b> — the write was delivered: skip it and
+     *       report {@code deduped=true}, as before.</li>
+     * </ul>
+     * Whenever a sent write comes back degraded, the row is marked {@code failed} with the
+     * degraded reason in {@code result}, so the trail never says {@code pending} for a
+     * write admin-bff did not accept. The 202 pending-reconcile contract is unchanged.
+     */
+    private Mono<Sent> sendOrDedup(ModActionRepository.RecordedBan recorded,
+                                   Supplier<Mono<SuspensionOutcome>> write,
+                                   String label, String role, String target) {
+        ModAction row = recorded.action();
+        if (recorded.fresh()) {
+            return sendAndRecord(row, write);
+        }
+        if (!ModActionRepository.PROPAGATION_FAILED.equals(row.propagationState())) {
+            log.info("[{}] dedup hit — role={} target={} already recorded (id={})", label, role, target, row.id());
+            return Mono.just(new Sent(row, SuspensionOutcome.PENDING, true));
+        }
+        log.info("[{}] retry of a FAILED write — role={} target={} (id={}); re-sending", label, role, target, row.id());
+        return audit.claimFailedForRetry(row.id())
+                .flatMap(claimed -> sendAndRecord(claimed, write))
+                // Lost the claim to a concurrent retry: report the row as it now stands.
+                .switchIfEmpty(Mono.defer(() -> audit.byId(row.id()).defaultIfEmpty(row)
+                        .map(current -> new Sent(current, SuspensionOutcome.PENDING, true))));
+    }
+
+    /** Send the write; a degraded outcome marks the row {@code failed} (never {@code pending}). */
+    private Mono<Sent> sendAndRecord(ModAction row, Supplier<Mono<SuspensionOutcome>> write) {
+        return write.get().flatMap(outcome -> outcome.isDegraded()
+                ? audit.markFailed(row.id(), outcome.state()).defaultIfEmpty(row)
+                        .map(failed -> new Sent(failed, outcome, false))
+                : Mono.just(new Sent(row, outcome, false)));
+    }
+
+    /** A desired-state write's persisted row, its outcome, and whether it was a dedup skip. */
+    private record Sent(ModAction action, SuspensionOutcome outcome, boolean deduped) {}
 
     /**
      * Build the dedup key, record the intent row, and then either skip (dedup hit) or
@@ -252,15 +296,10 @@ public class ModService {
         // Record the restore intent (idempotent on dedup_key) before any desired-state write.
         return audit.recordBan(dedupKey, actor, ModActionType.ACCESS_RESTORE, "access",
                         target, null, banType(platform), null, "pending", domain)
-                .flatMap(recorded -> {
-                    // Dedup hit: the clear() was already issued; return the persisted pending row.
-                    if (!recorded.fresh()) {
-                        return Mono.just(BanResult.pending(recorded.action(), true));
-                    }
-                    // Fresh row: forward the clear desired-state to admin-bff and map the outcome.
-                    return suspensions.clear(role, target)
-                            .map(outcome -> BanResult.of(recorded.action(), outcome, false));
-                });
+                // Send the clear (fresh row, or a retry of a FAILED one) or skip it (dedup hit).
+                .flatMap(recorded -> sendOrDedup(recorded, () -> suspensions.clear(role, target),
+                        "lift", role, target))
+                .map(sent -> BanResult.of(sent.action(), sent.outcome(), sent.deduped()));
     }
 
     /**
@@ -285,15 +324,9 @@ public class ModService {
      */
     private Mono<LockResult> applyLockOrDedup(ModActionRepository.RecordedBan recorded,
                                               String role, String target, String reason) {
-        // Dedup hit: the lock() was already issued; return the persisted pending row.
-        if (!recorded.fresh()) {
-            log.info("[domain-lock] dedup hit — role={} target={} already recorded (id={})",
-                    role, target, recorded.action().id());
-            return Mono.just(LockResult.pending(recorded.action(), true));
-        }
-        // Fresh row: forward the lock desired-state to admin-bff and map the outcome.
-        return domainLocks.lock(role, target, reason)
-                .map(outcome -> LockResult.of(recorded.action(), outcome, false));
+        // Send the lock (fresh row, or a retry of a FAILED one) or skip it (dedup hit).
+        return sendOrDedup(recorded, () -> domainLocks.lock(role, target, reason), "domain-lock", role, target)
+                .map(sent -> LockResult.of(sent.action(), sent.outcome(), sent.deduped()));
     }
 
     /**
@@ -307,15 +340,10 @@ public class ModService {
         // Record the unlock intent (idempotent on dedup_key) before any desired-state write.
         return audit.recordBan(dedupKey, actor, ModActionType.DOMAIN_UNLOCK, "domain-lock",
                         target, null, "user", null, "pending", domain)
-                .flatMap(recorded -> {
-                    // Dedup hit: the unlock() was already issued; return the persisted pending row.
-                    if (!recorded.fresh()) {
-                        return Mono.just(LockResult.pending(recorded.action(), true));
-                    }
-                    // Fresh row: forward the unlock desired-state to admin-bff and map the outcome.
-                    return domainLocks.unlock(role, target)
-                            .map(outcome -> LockResult.of(recorded.action(), outcome, false));
-                });
+                // Send the unlock (fresh row, or a retry of a FAILED one) or skip it (dedup hit).
+                .flatMap(recorded -> sendOrDedup(recorded, () -> domainLocks.unlock(role, target),
+                        "domain-unlock", role, target))
+                .map(sent -> LockResult.of(sent.action(), sent.outcome(), sent.deduped()));
     }
 
     /**
@@ -927,10 +955,6 @@ public class ModService {
     /** The pending-reconcile outcome of a ban/lift + the persisted audit row. */
     public record BanResult(ModAction action, String state, boolean deduped) {
 
-        static BanResult pending(ModAction action, boolean deduped) {
-            return new BanResult(action, SuspensionOutcome.PENDING.state(), deduped);
-        }
-
         static BanResult of(ModAction action, SuspensionOutcome outcome, boolean deduped) {
             return new BanResult(action, outcome.state(), deduped);
         }
@@ -952,10 +976,6 @@ public class ModService {
      * the controller returns the same {@code 202 {state:'pending-reconcile'}} contract.
      */
     public record LockResult(ModAction action, String state, boolean deduped) {
-
-        static LockResult pending(ModAction action, boolean deduped) {
-            return new LockResult(action, SuspensionOutcome.PENDING.state(), deduped);
-        }
 
         static LockResult of(ModAction action, SuspensionOutcome outcome, boolean deduped) {
             return new LockResult(action, outcome.state(), deduped);

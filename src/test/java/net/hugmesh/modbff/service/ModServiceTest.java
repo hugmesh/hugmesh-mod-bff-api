@@ -84,6 +84,10 @@ class ModServiceTest {
         when(audit.recordBan(anyString(), anyString(), anyString(), anyString(), anyString(),
                 any(), any(), any(), anyString(), anyString()))
                 .thenReturn(Mono.just(new ModActionRepository.RecordedBan(row("access.suspend"), true)));
+        // #27: a degraded desired-state write marks its row failed (result = the reason).
+        when(audit.markFailed(anyString(), anyString())).thenAnswer(inv -> Mono.just(new ModAction(
+                inv.getArgument(0), "mod:bob", "access.suspend", "access", "alice", null, inv.getArgument(1),
+                LocalDateTime.parse("2026-06-06T00:00:00"), "k", "user", null, "failed")));
         when(suspensions.suspend(anyString(), anyString(), any(), any()))
                 .thenReturn(Mono.just(SuspensionOutcome.PENDING));
         when(domainLocks.lock(anyString(), anyString(), any()))
@@ -165,6 +169,8 @@ class ModServiceTest {
         // with the actor's domain (no DOMAIN_ authority on this auth → "default").
         verify(audit).recordBan(anyString(), anyString(), eq("access.suspend"), eq("access"),
                 eq("alice"), isNull(), eq("user"), isNull(), eq("pending"), eq("default"));
+        // ... and then marked failed with the degraded reason, not left pending (#27).
+        verify(audit).markFailed("id-1", "degraded:CallNotPermittedException");
     }
 
     // ── dedup: a redelivery does NOT re-issue the desired-state write ──
@@ -293,6 +299,8 @@ class ModServiceTest {
         // with the actor's domain (no DOMAIN_ authority on this auth → "default").
         verify(audit).recordBan(anyString(), anyString(), eq("domain.lock"), eq("domain-lock"),
                 eq("alice"), isNull(), eq("user"), isNull(), eq("pending"), eq("default"));
+        // ... and then marked failed with the degraded reason, not left pending (#27).
+        verify(audit).markFailed("id-1", "degraded:CallNotPermittedException");
     }
 
     // ── dedup: a redelivery does NOT re-issue the desired-state write ──
