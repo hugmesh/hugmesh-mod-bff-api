@@ -41,6 +41,7 @@ import static org.mockito.Mockito.when;
 class ModServiceFailedWriteRetryTest {
 
     private static final String LOCK_ROLE = AdminDomainLockClient.ROLE_MATRIX_DOMAINLOCKED;
+    private static final String PENDING = ModActionRepository.PROPAGATION_PENDING;
     private static final SuspensionOutcome BAD_REQUEST = SuspensionOutcome.degraded("BadRequest");
 
     AdminSuspensionClient suspensions;
@@ -235,6 +236,41 @@ class ModServiceFailedWriteRetryTest {
 
         verify(domainLocks, times(1)).lock(LOCK_ROLE, "frank", null);
         assertThat(retry.deduped()).isTrue();
+        // The row is still FAILED: the answer says so, never a pending-reconcile.
+        assertThat(retry.state()).isEqualTo("degraded:BadRequest");
+        assertThat(retry.action().propagationState()).isEqualTo("failed");
+    }
+
+    @Test
+    void retry_thatLosesTheClaimToAWinnerThatAlsoFailed_reportsTheFailure() {
+        when(domainLocks.lock(anyString(), anyString(), any())).thenReturn(Mono.just(BAD_REQUEST));
+        service.domainLock(LOCK_ROLE, "frank", null, null, mod()).block();
+        // A concurrent winner takes the claim, re-sends, fails again and re-marks the row,
+        // all between our losing claim and our re-read.
+        audit.claimAlwaysLost = true;
+        audit.whenClaimLost = id -> audit.markFailed(id, "degraded:Timeout").block();
+
+        ModService.LockResult retry = service.domainLock(LOCK_ROLE, "frank", null, null, mod()).block();
+
+        verify(domainLocks, times(1)).lock(LOCK_ROLE, "frank", null);
+        assertThat(retry.state()).isEqualTo("degraded:Timeout");
+    }
+
+    @Test
+    void retry_thatLosesTheClaimToAWinnerThatLanded_reportsPending() {
+        when(domainLocks.lock(anyString(), anyString(), any())).thenReturn(Mono.just(BAD_REQUEST));
+        service.domainLock(LOCK_ROLE, "frank", null, null, mod()).block();
+        // A concurrent winner takes the claim (row back to pending) and its re-send lands,
+        // between our losing claim and our re-read.
+        audit.claimAlwaysLost = true;
+        audit.whenClaimLost = id -> audit.rows.computeIfPresent(id,
+                (k, r) -> InMemoryAudit.with(r, PENDING, PENDING));
+
+        ModService.LockResult retry = service.domainLock(LOCK_ROLE, "frank", null, null, mod()).block();
+
+        verify(domainLocks, times(1)).lock(LOCK_ROLE, "frank", null);
+        assertThat(retry.deduped()).isTrue();
+        assertThat(retry.state()).isEqualTo("pending-reconcile");
     }
 
     /**
@@ -249,6 +285,8 @@ class ModServiceFailedWriteRetryTest {
         final Map<String, ModAction> rows = new LinkedHashMap<>();
         final AtomicInteger claims = new AtomicInteger();
         boolean claimAlwaysLost;
+        /** Runs inside a LOST claim: what the concurrent winner did to the row meanwhile. */
+        java.util.function.Consumer<String> whenClaimLost = id -> { };
 
         InMemoryAudit() {
             super(null);
@@ -282,6 +320,7 @@ class ModServiceFailedWriteRetryTest {
             claims.incrementAndGet();
             ModAction r = rows.get(id);
             if (claimAlwaysLost || r == null || !PROPAGATION_FAILED.equals(r.propagationState())) {
+                whenClaimLost.accept(id);
                 return Mono.empty();
             }
             ModAction claimed = with(r, PROPAGATION_PENDING, PROPAGATION_PENDING);
@@ -299,7 +338,7 @@ class ModServiceFailedWriteRetryTest {
             return rows.values().iterator().next();
         }
 
-        private static ModAction with(ModAction r, String result, String propagationState) {
+        static ModAction with(ModAction r, String result, String propagationState) {
             return new ModAction(r.id(), r.actor(), r.action(), r.platform(), r.target(), r.reason(),
                     result, r.ts(), r.dedupKey(), r.banType(), r.expiresAt(), propagationState,
                     r.domain(), r.notifyChannels(), r.notifyEmailOnly());

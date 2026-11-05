@@ -244,9 +244,17 @@ public class ModService {
         log.info("[{}] retry of a FAILED write — role={} target={} (id={}); re-sending", label, role, target, row.id());
         return audit.claimFailedForRetry(row.id())
                 .flatMap(claimed -> sendAndRecord(claimed, write))
-                // Lost the claim to a concurrent retry: report the row as it now stands.
+                // Lost the claim to a concurrent retry: send nothing, and report the row as it
+                // now stands — still FAILED reports its degraded reason, never a pending-reconcile.
                 .switchIfEmpty(Mono.defer(() -> audit.byId(row.id()).defaultIfEmpty(row)
-                        .map(current -> new Sent(current, SuspensionOutcome.PENDING, true))));
+                        .map(current -> new Sent(current, outcomeOf(current), true))));
+    }
+
+    /** The outcome a persisted row stands for: its degraded reason when FAILED, else pending. */
+    private static SuspensionOutcome outcomeOf(ModAction row) {
+        return ModActionRepository.PROPAGATION_FAILED.equals(row.propagationState()) && row.result() != null
+                ? new SuspensionOutcome(row.result())
+                : SuspensionOutcome.PENDING;
     }
 
     /** Send the write; a degraded outcome marks the row {@code failed} (never {@code pending}). */
