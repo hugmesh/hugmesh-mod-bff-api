@@ -1,5 +1,6 @@
 package net.hugmesh.modbff.audit;
 
+import org.springframework.data.r2dbc.repository.Modifying;
 import org.springframework.data.r2dbc.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.data.repository.reactive.ReactiveCrudRepository;
@@ -169,4 +170,39 @@ public interface ModActionR2dbcRepository extends ReactiveCrudRepository<ModActi
                                     @Param("domain") String domain,
                                     @Param("notify_channels") String notifyChannels,
                                     @Param("notify_email_only") Boolean notifyEmailOnly);
+
+    // -- PROPAGATION-STATE UPDATEs (hugmesh-mod-bff-api#27). A desired-state write that
+    //    admin-bff did not accept is recorded on its row (result = the degraded reason,
+    //    propagation_state = 'failed'), and a retry CLAIMS such a row before re-sending it.
+
+    /** Record a desired-state write's outcome on its row (by id). */
+    String UPDATE_PROPAGATION_BY_ID = """
+            UPDATE mod_action \
+            SET result = :result, propagation_state = :propagation_state \
+            WHERE id = :id""";
+
+    /**
+     * Compare-and-set claim of a FAILED row for a retry: moves it back to
+     * {@code :propagation_state} ONLY while it is still {@code :expected}. Exactly one of
+     * two concurrent retries updates the row (1 row) and re-sends; the other sees 0 rows.
+     */
+    String CLAIM_PROPAGATION_BY_ID = """
+            UPDATE mod_action \
+            SET result = :result, propagation_state = :propagation_state \
+            WHERE id = :id AND propagation_state = :expected""";
+
+    /** Set {@code result} + {@code propagation_state} on one row; returns the row count. */
+    @Modifying
+    @Query(UPDATE_PROPAGATION_BY_ID)
+    Mono<Long> updatePropagation(@Param("id") UUID id,
+                                 @Param("result") String result,
+                                 @Param("propagation_state") String propagationState);
+
+    /** The compare-and-set claim; returns 1 when THIS call moved the row, else 0. */
+    @Modifying
+    @Query(CLAIM_PROPAGATION_BY_ID)
+    Mono<Long> claimPropagation(@Param("id") UUID id,
+                                @Param("expected") String expected,
+                                @Param("result") String result,
+                                @Param("propagation_state") String propagationState);
 }

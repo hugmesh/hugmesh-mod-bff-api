@@ -30,7 +30,11 @@ import java.time.LocalDateTime;
  *   <li>{@code banType} — {@code user} | {@code instance} | {@code profile}.</li>
  *   <li>{@code expiresAt} — TTL: {@code null} = permanent ban.</li>
  *   <li>{@code propagationState} — {@code pending} | {@code applied} | {@code failed};
- *       a STUBBED/degraded/breaker-open ban stays {@code pending} (never {@code applied}).</li>
+ *       {@code pending} once admin-bff accepted the desired-state write (never
+ *       {@code applied} — the reconcile loop owns the effect), {@code failed} when
+ *       admin-bff did not accept it (degraded/breaker-open; {@code result} then carries
+ *       the {@code degraded:<reason>}). A retry of the same action re-sends a
+ *       {@code failed} row instead of deduping it (hugmesh-mod-bff-api#27).</li>
  * </ul>
  *
  * <p>App-generated UUID id (portable Postgres + the H2 test DB; no DB-default

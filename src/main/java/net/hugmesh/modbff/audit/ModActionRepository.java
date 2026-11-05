@@ -5,6 +5,7 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.time.LocalDateTime;
+import java.util.UUID;
 
 /**
  * Reactive (R2DBC) store for the BFF's OWN {@code mod_action} audit table (schema
@@ -56,6 +57,15 @@ public class ModActionRepository {
     /** Hard server-side cap: a caller-supplied {@code ?limit=} is clamped to this ceiling
      *  (and a floor of 1), so even an attacker-chosen value cannot un-bound the read. */
     public static final int MAX_AUDIT_LIMIT = 1000;
+
+    /** {@code propagation_state} of a desired-state row whose write is in flight or
+     *  accepted by admin-bff (the reconcile loop will apply it). */
+    public static final String PROPAGATION_PENDING = "pending";
+
+    /** {@code propagation_state} of a desired-state row whose write admin-bff did NOT
+     *  accept (breaker open, timeout, 4xx/5xx). Such a row is eligible for a re-send on a
+     *  retry of the same action (hugmesh-mod-bff-api#27). */
+    public static final String PROPAGATION_FAILED = "failed";
 
     /**
      * Clamp a caller-influenced limit to {@code [1, MAX_AUDIT_LIMIT]}. Defense-in-depth:
@@ -242,6 +252,38 @@ public class ModActionRepository {
     public Mono<ModAction> byDedupKey(String dedupKey, String domain) {
         if (domain == null) return Mono.empty();                    // fail-closed: deny
         return repo.findByDedupKeyAndDomain(dedupKey, domain).map(ModActionRow::toModAction);
+    }
+
+    /**
+     * Mark a desired-state row FAILED: admin-bff did not accept the write, so the row must
+     * not keep claiming {@code pending} (hugmesh-mod-bff-api#27). {@code result} carries the
+     * degraded reason (e.g. {@code degraded:BadRequest}), the same honest outcome the
+     * {@code matrix.block-user} route already records. Returns the updated row.
+     */
+    public Mono<ModAction> markFailed(String id, String result) {
+        UUID uuid = UUID.fromString(id);
+        return repo.updatePropagation(uuid, result, PROPAGATION_FAILED)
+                .then(repo.findById(uuid))
+                .map(ModActionRow::toModAction);
+    }
+
+    /**
+     * Claim a FAILED row for a retry: atomically move it back to {@code pending} only while
+     * it is still {@code failed}. Emits the claimed (now pending) row when THIS call won the
+     * claim and should re-send the write; completes EMPTY when the row was not failed (or a
+     * concurrent retry claimed it first), in which case the caller must not re-send.
+     */
+    public Mono<ModAction> claimFailedForRetry(String id) {
+        UUID uuid = UUID.fromString(id);
+        return repo.claimPropagation(uuid, PROPAGATION_FAILED, PROPAGATION_PENDING, PROPAGATION_PENDING)
+                .filter(rows -> rows > 0)
+                .flatMap(rows -> repo.findById(uuid))
+                .map(ModActionRow::toModAction);
+    }
+
+    /** Read one row by its (DB-generated) id. */
+    public Mono<ModAction> byId(String id) {
+        return repo.findById(UUID.fromString(id)).map(ModActionRow::toModAction);
     }
 
     /** Defensive: a {@code null}/blank domain stamps {@code "default"} so a persisted
