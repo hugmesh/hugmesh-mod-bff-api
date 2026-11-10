@@ -2,6 +2,10 @@ name: Release
 
 # Builds the image and pushes it to GHCR (ghcr.io/hugmesh/hugmesh-mod-bff-api).
 #
+# hugmesh-release-channels: beta+stable
+# (the marker the org release script, hugmesh-generator scripts/release.sh --channel stable,
+# looks for next to the release/** trigger before it cuts a stable release of this repo)
+#
 # WHAT EACH TRIGGER PUBLISHES (the version comes from pom.xml <project><version>; the
 # first job, `version`, runs scripts/release-version.sh, which refuses anything else):
 #

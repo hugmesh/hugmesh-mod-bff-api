@@ -147,6 +147,10 @@ for desc, args in [
 # ── triggers, checkout depth, overwrite guard ─────────────────────────────────────────
 check("push runs on main and release/**", re.search(r"^\s+branches: \[main, 'release/\*\*'\]$", WF, re.M) is not None)
 check("tag pushes still run on v*", re.search(r"^\s+tags: \['v\*'\]$", WF, re.M) is not None)
+# The org release script (hugmesh-generator scripts/release.sh --channel stable) refuses a
+# repo whose release.yml lacks this literal marker next to the release/** trigger.
+check("stable-channel marker for the org release script",
+      re.search(r"^# hugmesh-release-channels: beta\+stable$", WF, re.M) is not None)
 check("no pull_request trigger", re.search(r"^\s+pull_request(_target)?:", WF, re.M) is None)
 version_job = WF.split("\n  version:\n", 1)[1].split("\n  image:\n", 1)[0]
 check("version job checks out with fetch-depth: 0", re.search(r"^\s+fetch-depth: 0$", version_job, re.M) is not None)
