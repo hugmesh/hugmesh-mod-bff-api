@@ -14,7 +14,7 @@
   <parent>
     <groupId>net.hugmesh</groupId>
     <artifactId>hugmesh-parent</artifactId>
-    <version>2.9.0-beta.1</version>
+    <version>2.10.0-beta.1</version>
     <relativePath/>
   </parent>
 
@@ -27,7 +27,7 @@
   <!-- NO -api suffix in the artifactId; the -api lives only in the repo / service
        / image name (hugmesh-mod-bff-api), mirroring admin-bff. -->
   <artifactId>mod-bff</artifactId>
-  <version>0.4.0-beta.2</version>
+  <version>0.5.0-beta.1</version>
 
   <dependencies>
     <!-- The shared, canonical HugMesh security/tenancy/config/web building blocks
@@ -52,7 +52,7 @@
     <dependency>
       <groupId>net.hugmesh</groupId>
       <artifactId>hugmesh-commons</artifactId>
-      <version>2.2.0-beta.1</version>
+      <version>2.3.0-beta.1</version>
       <classifier>tests</classifier>
       <scope>test</scope>
     </dependency>
